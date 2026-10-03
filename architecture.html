@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Onexo Architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --bg: #f6f7f4;
+    --surface: #ffffff;
+    --ink: #1e2722;
+    --muted: #5d6b64;
+    --line: #d7ddd7;
+    --accent: #0b7285;
+    --accent-soft: rgba(11, 114, 133, 0.08);
+    --warn: #9a6700;
+    --code-bg: #ecefeb;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101512;
+      --surface: #161d19;
+      --ink: #e5eae6;
+      --muted: #9aa69f;
+      --line: #2a332d;
+      --accent: #5bc8da;
+      --accent-soft: rgba(91, 200, 218, 0.1);
+      --warn: #e0a82e;
+      --code-bg: #1d2621;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101512;
+    --surface: #161d19;
+    --ink: #e5eae6;
+    --muted: #9aa69f;
+    --line: #2a332d;
+    --accent: #5bc8da;
+    --accent-soft: rgba(91, 200, 218, 0.1);
+    --warn: #e0a82e;
+    --code-bg: #1d2621;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+    padding-inline: 20px;
+    padding-block: 0 80px;
+  }
+  main { max-width: 900px; margin: 0 auto; }
+
+  header.masthead {
+    padding-block: 56px 40px;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 12px;
+  }
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-size: clamp(30px, 5vw, 44px);
+    font-weight: 700;
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  .lede { font-size: 18px; color: var(--muted); max-width: 62ch; margin: 0; }
+
+  section { padding-block: 40px 8px; }
+  h2 {
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+  .sec-label {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 6px;
+  }
+  h3 { font-size: 18px; font-weight: 600; margin: 26px 0 4px; }
+  p { max-width: 68ch; margin: 10px 0; }
+  ul, ol { max-width: 68ch; padding-left: 22px; }
+  li { margin-block: 6px; }
+  strong { font-weight: 600; }
+
+  code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.86em;
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  figure {
+    margin: 26px 0 30px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 12px 8px;
+  }
+  .scroll { overflow-x: auto; }
+  figure svg {
+    display: block;
+    min-width: 640px;
+    width: 100%;
+    height: auto;
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+  }
+  figcaption {
+    font-size: 13.5px;
+    color: var(--muted);
+    padding: 10px 8px 6px;
+    border-top: 1px solid var(--line);
+    margin-top: 10px;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  /* SVG vocabulary */
+  .box   { fill: var(--surface); stroke: currentColor; stroke-width: 1.4; }
+  .zone  { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 6 5; }
+  .soft  { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+  .abox  { fill: var(--surface); stroke: var(--accent); stroke-width: 1.6; }
+  .flow  { stroke: currentColor; stroke-width: 1.5; fill: none; }
+  .aflow { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+  .xflow { stroke: var(--muted); stroke-width: 1.5; fill: none; stroke-dasharray: 5 5; }
+  .life  { stroke: var(--line); stroke-width: 1.2; }
+  .t     { font-size: 13.5px; fill: currentColor; font-weight: 600; }
+  .s     { font-size: 11.5px; fill: var(--muted); }
+  .m     { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; fill: var(--muted); }
+  .ma    { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; fill: var(--accent); }
+  .lab   { font-size: 11.5px; fill: currentColor; }
+  .alab  { font-size: 11.5px; fill: var(--accent); font-weight: 600; }
+  .zl    { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px; fill: var(--muted); letter-spacing: 0.1em; }
+  .num   { fill: var(--accent); }
+  .numt  { font-size: 11px; fill: var(--surface); font-weight: 700; }
+  .head-ink { fill: currentColor; }
+  .head-acc { fill: var(--accent); }
+
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 14.5px; }
+  th {
+    text-align: left;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    border-bottom: 2px solid var(--ink);
+    padding: 8px 12px 8px 0;
+  }
+  td { border-bottom: 1px solid var(--line); padding: 9px 12px 9px 0; vertical-align: top; }
+  td:first-child { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; white-space: nowrap; }
+
+  .callout {
+    border-left: 3px solid var(--warn);
+    background: var(--surface);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 18px;
+    margin: 18px 0;
+    max-width: 72ch;
+  }
+  .callout p { margin: 6px 0; }
+  .callout .tag {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--warn);
+  }
+  footer {
+    margin-top: 48px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--muted);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+  }
+</style>
+</head>
+<body>
+<main>
+
+<header class="masthead">
+  <p class="eyebrow">claude-code-poc · system notes</p>
+  <h1>Onexo Architecture</h1>
+  <p class="lede">A browser chat UI where every conversation gets its own hardware-isolated KVM microVM on AWS, running Claude Code headless — backed by a persistent S3 volume, so the VM is disposable but the files and history are not. The AWS box is reached only through an SSH tunnel.</p>
+</header>
+
+<section>
+  <p class="sec-label">01 · the whole system</p>
+  <h2>One map, two machines</h2>
+  <p>Everything lives on two machines. <strong>Your Mac</strong> runs the chat surface: the React frontend and the Bun backend. <strong>An EC2 instance in Mumbai</strong> runs CubeSandbox, and this is where Claude actually lives — each conversation gets a throwaway micro virtual machine with Claude Code running headless inside it, plus a <strong>persistent S3 volume</strong> mounted at <code>/home/user/projects</code> that survives the VM. The only way traffic moves between the two is an SSH tunnel — the AWS box exposes nothing to the internet except port 22.</p>
+
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 900 706" role="img" aria-label="Full system map: browser talks to the Bun backend over WebSocket; Bun reaches the AWS EC2 instance through an SSH tunnel, where the Cube API creates microVMs and S3 volumes, and nginx routes envd traffic into the microVM that runs Claude Code; the S3 volume mounts into the VM and outlives it.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="head-ink"/>
+        </marker>
+        <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="head-acc"/>
+        </marker>
+      </defs>
+
+      <!-- Mac zone -->
+      <rect x="20" y="18" width="860" height="270" rx="10" class="zone"/>
+      <text x="36" y="42" class="zl">YOUR MAC</text>
+
+      <rect x="60" y="62" width="200" height="62" rx="8" class="box"/>
+      <text x="160" y="88" text-anchor="middle" class="t">Browser</text>
+      <text x="160" y="106" text-anchor="middle" class="m">React chat · :5173</text>
+
+      <!-- per-conversation note -->
+      <rect x="500" y="62" width="330" height="128" rx="8" class="soft"/>
+      <text x="520" y="90" class="alab">One conversation =</text>
+      <text x="520" y="114" class="s">one microVM — Claude Code runs inside it</text>
+      <text x="520" y="134" class="s">one S3 volume — the files, outlives the VM</text>
+      <text x="520" y="154" class="s">one transcript — synced out after every turn</text>
+      <text x="520" y="176" class="m">vol-&lt;org&gt;-&lt;user&gt;-&lt;id&gt;</text>
+
+      <rect x="60" y="196" width="360" height="86" rx="8" class="box"/>
+      <text x="76" y="222" class="t">Bun backend</text>
+      <text x="76" y="241" class="m">:8091 · WebSocket + web build + SQLite sidebar</text>
+      <text x="76" y="257" class="m">vmclaude.ts · VM session client (per conversation)</text>
+      <text x="76" y="273" class="m">idle timeout · LRU eviction · getIdentity() seam</text>
+
+      <line x1="160" y1="124" x2="160" y2="194" class="flow" marker-end="url(#ar)"/>
+      <text x="170" y="152" class="lab">WebSocket</text>
+      <text x="170" y="167" class="m">stream-json events</text>
+
+      <!-- Bun → tunnel -->
+      <line x1="135" y1="282" x2="135" y2="328" class="aflow" marker-end="url(#ara)"/>
+      <line x1="315" y1="282" x2="315" y2="328" class="aflow" marker-end="url(#ara)"/>
+      <text x="143" y="310" class="ma">VM + volume lifecycle</text>
+      <text x="323" y="310" class="ma">claude stdio · files</text>
+
+      <!-- tunnel band -->
+      <rect x="20" y="330" width="860" height="66" rx="10" class="soft"/>
+      <text x="36" y="355" class="alab">SSH tunnel — encrypted, the only way in (port 22)</text>
+      <text x="36" y="378" class="ma">-L 3000:localhost:3000&#160;&#160;&#160;-L 3080:localhost:80&#160;&#160;&#160;-L 12088:localhost:12088</text>
+
+      <!-- tunnel → AWS -->
+      <line x1="135" y1="396" x2="135" y2="452" class="aflow" marker-end="url(#ara)"/>
+      <line x1="315" y1="396" x2="315" y2="452" class="aflow" marker-end="url(#ara)"/>
+      <text x="143" y="420" class="ma">:3000</text>
+      <text x="323" y="420" class="ma">:3080 → :80</text>
+
+      <!-- AWS zone -->
+      <rect x="20" y="412" width="860" height="282" rx="10" class="zone"/>
+      <text x="36" y="684" class="zl">AWS EC2 · MUMBAI · t3.xlarge · UBUNTU 24.04 + PVM KERNEL</text>
+
+      <rect x="50" y="454" width="180" height="64" rx="8" class="box"/>
+      <text x="140" y="479" text-anchor="middle" class="t">Cube API</text>
+      <text x="140" y="497" text-anchor="middle" class="m">:3000 · sandboxes + volumes</text>
+
+      <rect x="250" y="454" width="180" height="64" rx="8" class="box"/>
+      <text x="340" y="479" text-anchor="middle" class="t">nginx · CubeProxy</text>
+      <text x="340" y="497" text-anchor="middle" class="m">:80 · Host-header routing</text>
+
+      <!-- microVM stack -->
+      <rect x="560" y="436" width="230" height="78" rx="8" class="box" opacity="0.45"/>
+      <rect x="572" y="448" width="230" height="78" rx="8" class="box" opacity="0.7"/>
+      <rect x="584" y="460" width="230" height="78" rx="8" class="abox"/>
+      <text x="699" y="486" text-anchor="middle" class="t">microVM (KVM)</text>
+      <text x="699" y="504" text-anchor="middle" class="m">Claude Code — headless</text>
+      <text x="699" y="520" text-anchor="middle" class="m">own kernel · 2 vCPU · ~3 GB</text>
+
+      <!-- nginx routes envd into VM -->
+      <line x1="430" y1="470" x2="556" y2="470" class="aflow" marker-end="url(#ara)"/>
+      <text x="436" y="462" class="ma">Host: 49983-&lt;id&gt;… → envd</text>
+
+      <!-- api manages VMs + volumes -->
+      <path d="M140 518 V566 H520 V510 H554" class="flow" marker-end="url(#ar)"/>
+      <text x="166" y="560" class="lab">creates / destroys VMs &amp; volumes (boot ~60 ms)</text>
+
+      <!-- persistent volume -->
+      <rect x="584" y="600" width="230" height="60" rx="8" class="soft"/>
+      <text x="699" y="626" text-anchor="middle" class="t">S3 volume</text>
+      <text x="699" y="644" text-anchor="middle" class="m">MinIO · vol-&lt;org&gt;-&lt;user&gt;-&lt;id&gt;</text>
+
+      <line x1="699" y1="540" x2="699" y2="598" class="aflow" marker-start="url(#ara)" marker-end="url(#ara)"/>
+      <text x="330" y="614" class="ma">virtiofs mount at /home/user/projects</text>
+      <text x="330" y="632" class="s">the volume outlives the VM — that's the persistence</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 1 — the full system.</b> Teal marks the session path. The load-bearing idea: the microVM is <em>disposable</em> (destroyed on idle, eviction, or "End session"), but the S3 volume it mounts is not — so a conversation can always come back, on any node.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <p class="sec-label">02 · the chat plumbing</p>
+  <h2>How a message flows</h2>
+  <p>The default backend is <code>CLAUDE_BACKEND=cubesandbox</code> — one VM per conversation:</p>
+  <ol>
+    <li>The browser keeps one <strong>WebSocket</strong> open to the Bun backend and sends <code>{"type":"chat","text":"…"}</code>.</li>
+    <li>On the first message of a conversation the backend <strong>creates the session's S3 volume</strong> (<code>POST /volumes {name, driver:"s3"}</code>) and boots a <code>claude-code</code>-template microVM with it mounted at <code>/home/user/projects</code> (<code>volumeMounts</code> on <code>POST /sandboxes</code>). One root-level <code>chown user:user</code> makes the mount writable — that fix persists on the volume.</li>
+    <li>Inside the VM, a <strong>persistent headless Claude Code process</strong> is started via envd: <code>claude -p --input-format stream-json --output-format stream-json</code>, working directory on the volume. Your message is written to its stdin; there is no per-message process startup.</li>
+    <li>Claude's output streams back as JSON events (token by token), which the backend relays to the browser unchanged. After every turn the backend <strong>syncs the transcript</strong> (<code>&lt;session-id&gt;.jsonl</code>) out of the VM.</li>
+    <li>The sidebar's SQLite db stores ids, titles, the volume name, and the tenant (<code>org</code>/<code>user</code>) — never the messages.</li>
+  </ol>
+  <p>Credentials stay ephemeral: <code>~/.claude/.credentials.json</code> is injected at each launch and never written to the volume. The legacy <strong>docker mode</strong> (<code>CLAUDE_BACKEND=docker</code>) still exists — Claude in the local <code>claude-poc</code> container, with a <code>run_code</code> MCP tool that executes code in one-shot microVMs; the VM mode doesn't need that tool, since Claude's whole shell is already inside a VM.</p>
+</section>
+
+<section>
+  <p class="sec-label">03 · persistence &amp; resume</p>
+  <h2>The life of a conversation</h2>
+  <p>Because the files live on the volume, killing a VM costs nothing. That inverts the old teardown problem: instead of keeping VMs alive to protect state, the backend kills them freely and recreates them on demand.</p>
+
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 920 500" role="img" aria-label="Sequence: the backend creates a volume and a first microVM with it mounted; chat turns write files onto the volume and the transcript syncs out; on idle or End session the VM is deleted but the volume kept; reopening boots a second microVM that mounts the same volume and resumes with full files and history.">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="head-ink"/>
+        </marker>
+        <marker id="ara2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="head-acc"/>
+        </marker>
+      </defs>
+
+      <!-- lifeline headers -->
+      <rect x="50" y="16" width="140" height="36" rx="7" class="box"/>
+      <text x="120" y="39" text-anchor="middle" class="t">Bun backend</text>
+      <rect x="270" y="16" width="140" height="36" rx="7" class="box"/>
+      <text x="340" y="39" text-anchor="middle" class="t">Cube API</text>
+      <rect x="510" y="16" width="140" height="36" rx="7" class="abox"/>
+      <text x="580" y="39" text-anchor="middle" class="t">microVM #1</text>
+      <rect x="730" y="16" width="140" height="36" rx="7" class="abox"/>
+      <text x="800" y="39" text-anchor="middle" class="t">microVM #2</text>
+
+      <line x1="120" y1="52" x2="120" y2="420" class="life"/>
+      <line x1="340" y1="52" x2="340" y2="420" class="life"/>
+      <line x1="580" y1="52" x2="580" y2="266" class="life"/>
+      <line x1="800" y1="340" x2="800" y2="420" class="life"/>
+
+      <!-- 1 create volume -->
+      <line x1="120" y1="84" x2="336" y2="84" class="flow" marker-end="url(#ar2)"/>
+      <circle cx="137" cy="84" r="9" class="num"/><text x="137" y="88" text-anchor="middle" class="numt">1</text>
+      <text x="232" y="74" text-anchor="middle" class="m">POST /volumes {name, driver:"s3"}</text>
+
+      <!-- 2 create sandbox with mount -->
+      <line x1="120" y1="118" x2="336" y2="118" class="flow" marker-end="url(#ar2)"/>
+      <circle cx="137" cy="118" r="9" class="num"/><text x="137" y="122" text-anchor="middle" class="numt">2</text>
+      <text x="232" y="108" text-anchor="middle" class="m">POST /sandboxes + volumeMounts</text>
+
+      <!-- 3 boot -->
+      <line x1="340" y1="150" x2="576" y2="150" class="aflow" marker-end="url(#ara2)"/>
+      <circle cx="357" cy="150" r="9" class="num"/><text x="357" y="154" text-anchor="middle" class="numt">3</text>
+      <text x="462" y="140" text-anchor="middle" class="ma">boot ~60 ms · volume at /home/user/projects</text>
+
+      <!-- 4 chat turns -->
+      <line x1="120" y1="192" x2="576" y2="192" class="aflow" marker-end="url(#ara2)"/>
+      <circle cx="137" cy="192" r="9" class="num"/><text x="137" y="196" text-anchor="middle" class="numt">4</text>
+      <text x="350" y="182" text-anchor="middle" class="ma">chat turns — headless claude, files land on the volume</text>
+      <line x1="580" y1="220" x2="124" y2="220" class="aflow" marker-end="url(#ara2)"/>
+      <text x="350" y="238" text-anchor="middle" class="m">stream-json events + transcript sync after every turn</text>
+
+      <!-- 5 delete -->
+      <line x1="120" y1="266" x2="336" y2="266" class="flow" marker-end="url(#ar2)"/>
+      <circle cx="137" cy="266" r="9" class="num"/><text x="137" y="270" text-anchor="middle" class="numt">5</text>
+      <text x="232" y="256" text-anchor="middle" class="m">idle 5 min / "End session" → DELETE /sandboxes</text>
+      <text x="580" y="288" text-anchor="middle" class="lab">✗ VM #1 gone — volume kept</text>
+
+      <!-- 6 reopen -->
+      <line x1="120" y1="316" x2="336" y2="316" class="flow" marker-end="url(#ar2)"/>
+      <circle cx="137" cy="316" r="9" class="num"/><text x="137" y="320" text-anchor="middle" class="numt">6</text>
+      <text x="232" y="306" text-anchor="middle" class="m">reopen: POST /sandboxes, same volume</text>
+
+      <!-- 7 boot #2 -->
+      <line x1="340" y1="340" x2="796" y2="340" class="aflow" marker-end="url(#ara2)"/>
+      <circle cx="357" cy="340" r="9" class="num"/><text x="357" y="344" text-anchor="middle" class="numt">7</text>
+      <text x="570" y="330" text-anchor="middle" class="ma">boot · mounts the same volume</text>
+
+      <!-- 8 resume -->
+      <line x1="120" y1="380" x2="796" y2="380" class="aflow" marker-end="url(#ara2)"/>
+      <circle cx="137" cy="380" r="9" class="num"/><text x="137" y="384" text-anchor="middle" class="numt">8</text>
+      <text x="460" y="370" text-anchor="middle" class="ma">upload transcript · claude --resume — files + history intact</text>
+
+      <!-- persistent volume band -->
+      <rect x="500" y="440" width="380" height="46" rx="8" class="soft"/>
+      <text x="690" y="459" text-anchor="middle" class="alab">S3 volume — outlives both VMs</text>
+      <text x="690" y="476" text-anchor="middle" class="ma">destroyed only by "Delete conversation"</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 2 — one conversation, two VMs, one volume.</b> Chosen over CubeSandbox's pause/resume: volume-restore is simpler, works across nodes (the data is in object storage), and sidesteps known pause bugs in v0.x.</figcaption>
+  </figure>
+
+  <h3>Teardown policy</h3>
+  <ul>
+    <li><strong>Never close on task-done</strong> — a conversation is many turns; the VM stays warm between them.</li>
+    <li><strong>Idle timeout ~5 min</strong> (<code>VM_IDLE_TTL_S=300</code>) — lossless now, so it can be short.</li>
+    <li><strong>Hard cap 2 h</strong> (<code>SANDBOX_SESSION_TIMEOUT_S=7200</code>) as a runaway safety net.</li>
+    <li><strong>LRU eviction at capacity</strong> (<code>MAX_LIVE_VMS=3</code> on this box) — a new session evicts the least-recently-used idle VM instead of blocking; the evicted session just resumes later.</li>
+    <li><strong>User controls</strong>: "End session" kills the VM and keeps the volume; "Delete conversation" also destroys the volume.</li>
+  </ul>
+
+  <h3>Tenancy</h3>
+  <p>Every volume and VM action is scoped through one function, <code>getIdentity()</code> in <code>server/index.ts</code>, which returns <code>{org, user}</code> — stubbed from headers/env in the PoC, backed by JWT/SSO in production with the same signature. Volumes are named <code>vol-&lt;org&gt;-&lt;user&gt;-&lt;id&gt;</code>, and the backend is the only thing that ever talks to the Cube API, so two users can never see each other's volumes. Decisions, scaling path, and the cost model live in <code>docs/persistent-sessions.md</code>.</p>
+</section>
+
+<section>
+  <p class="sec-label">04 · trick one</p>
+  <h2>PVM: microVMs on a cloud VM that has no KVM</h2>
+  <p>CubeSandbox normally needs <code>/dev/kvm</code> — hardware virtualization. But an EC2 instance is already a virtual machine, and AWS doesn't pass hardware virtualization through to it. Tencent's answer is <strong>PVM</strong> (Pagetable Virtual Machine): a modified host kernel whose <code>kvm_pvm</code> module provides a software implementation of the KVM interface, so microVMs run inside an ordinary cloud VM with near-native speed.</p>
+
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 920 322" role="img" aria-label="Layer diagram: AWS physical host at the bottom, the EC2 Ubuntu guest with the PVM kernel in the middle providing a software /dev/kvm, and multiple microVMs with their own kernels on top.">
+      <defs>
+        <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="head-acc"/>
+        </marker>
+      </defs>
+
+      <!-- top: microVMs -->
+      <rect x="60" y="36" width="230" height="84" rx="8" class="abox"/>
+      <text x="175" y="66" text-anchor="middle" class="t">microVM</text>
+      <text x="175" y="86" text-anchor="middle" class="m">own Linux kernel</text>
+      <text x="175" y="102" text-anchor="middle" class="m">one conversation's Claude</text>
+
+      <rect x="320" y="36" width="230" height="84" rx="8" class="abox"/>
+      <text x="435" y="66" text-anchor="middle" class="t">microVM</text>
+      <text x="435" y="86" text-anchor="middle" class="m">own Linux kernel</text>
+      <text x="435" y="102" text-anchor="middle" class="m">one conversation's Claude</text>
+
+      <rect x="580" y="36" width="230" height="84" rx="8" class="box" opacity="0.55"/>
+      <text x="695" y="66" text-anchor="middle" class="t">microVM …</text>
+      <text x="695" y="86" text-anchor="middle" class="m">~4 lean fit at once</text>
+      <text x="695" y="102" text-anchor="middle" class="m">(~3 GB each, memory-bound)</text>
+
+      <!-- middle: EC2 guest -->
+      <rect x="60" y="160" width="750" height="66" rx="8" class="box"/>
+      <text x="80" y="186" class="t">EC2 guest — Ubuntu 24.04 with the PVM host kernel</text>
+      <text x="80" y="206" class="m">kernel 6.6.69 cubesandbox.pvm.host · kvm_pvm module → software /dev/kvm · custom-built AWS ENA network driver</text>
+
+      <!-- bottom -->
+      <rect x="60" y="252" width="750" height="52" rx="8" class="box" opacity="0.6"/>
+      <text x="80" y="284" class="s">AWS physical host — Nitro hypervisor (hardware virtualization stops here; not passed through)</text>
+
+      <line x1="175" y1="158" x2="175" y2="122" class="aflow" marker-end="url(#ar3)"/>
+      <line x1="435" y1="158" x2="435" y2="122" class="aflow" marker-end="url(#ar3)"/>
+      <line x1="695" y1="158" x2="695" y2="122" class="flow" opacity="0.5" marker-end="url(#ar3)"/>
+      <text x="470" y="144" class="ma">kvm_pvm boots each VM</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 3 — the virtualization stack.</b> Hardware virtualization ends at AWS's own hypervisor. The PVM kernel recreates the KVM interface in software one layer up, which is what lets a $0.17/hr cloud VM host real, kernel-isolated VMs.</figcaption>
+  </figure>
+
+  <div class="callout">
+    <p class="tag">operational warning</p>
+    <p>The stock PVM kernel has <strong>no AWS ENA network driver</strong> — one was custom-built into it during setup. Upgrading the PVM kernel without rebuilding the ENA driver leaves the instance unreachable. Snapshot before touching the kernel.</p>
+  </div>
+</section>
+
+<section>
+  <p class="sec-label">05 · trick two</p>
+  <h2>Host-header routing: reaching a VM that has no address you can resolve</h2>
+  <p>Creating a sandbox is easy — that's just the Cube API on tunneled port 3000. The hard part is <em>talking to</em> the sandbox afterwards. Every interaction with a running VM — starting Claude, writing to its stdin, reading files, watching the file tree — goes through <strong>envd</strong>, an agent on port 49983 inside each VM, addressed as <code>49983-&lt;sandboxID&gt;.cube.app</code>. That hostname is resolved by a DNS server that only exists on the EC2 box. Your Mac has never heard of it.</p>
+
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 920 306" role="img" aria-label="Comparison: resolving the sandbox hostname from the Mac fails because cube.app DNS only exists on the EC2 box; instead the backend sends the request to the tunneled nginx port and sets the Host header manually, and nginx routes it to the right microVM's envd agent.">
+      <defs>
+        <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="head-ink"/>
+        </marker>
+        <marker id="ara4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0 0 L10 5 L0 10 z" class="head-acc"/>
+        </marker>
+      </defs>
+
+      <!-- fail row -->
+      <text x="40" y="40" class="zl">THE NAIVE WAY — FAILS ON THE MAC</text>
+      <rect x="40" y="58" width="150" height="56" rx="8" class="box"/>
+      <text x="115" y="82" text-anchor="middle" class="t">Mac</text>
+      <text x="115" y="100" text-anchor="middle" class="m">e2b SDK default</text>
+
+      <line x1="190" y1="86" x2="396" y2="86" class="xflow" marker-end="url(#ar4)"/>
+      <text x="293" y="76" text-anchor="middle" class="m">GET https://49983-ab12….cube.app</text>
+
+      <rect x="400" y="58" width="210" height="56" rx="8" class="box"/>
+      <text x="505" y="82" text-anchor="middle" class="t">DNS lookup: cube.app?</text>
+      <text x="505" y="100" text-anchor="middle" class="m">only resolvable on the EC2 box</text>
+      <text x="660" y="92" font-size="20" fill="var(--warn)" font-weight="700">✗ no such host</text>
+
+      <line x1="40" y1="144" x2="880" y2="144" class="life"/>
+
+      <!-- working row -->
+      <text x="40" y="176" class="zl">WHAT vmclaude.ts ACTUALLY DOES</text>
+      <rect x="40" y="194" width="150" height="56" rx="8" class="box"/>
+      <text x="115" y="218" text-anchor="middle" class="t">Mac</text>
+      <text x="115" y="236" text-anchor="middle" class="m">Bun · vmclaude.ts</text>
+
+      <line x1="190" y1="222" x2="356" y2="222" class="aflow" marker-end="url(#ara4)"/>
+      <text x="273" y="204" text-anchor="middle" class="ma">POST localhost:3080/…</text>
+      <text x="273" y="243" text-anchor="middle" class="ma">Host: 49983-ab12….cube.app</text>
+
+      <rect x="360" y="194" width="130" height="56" rx="8" class="soft"/>
+      <text x="425" y="218" text-anchor="middle" class="t">tunnel</text>
+      <text x="425" y="236" text-anchor="middle" class="m">3080 → :80</text>
+
+      <line x1="490" y1="222" x2="576" y2="222" class="aflow" marker-end="url(#ara4)"/>
+
+      <rect x="580" y="194" width="160" height="56" rx="8" class="box"/>
+      <text x="660" y="218" text-anchor="middle" class="t">nginx</text>
+      <text x="660" y="236" text-anchor="middle" class="m">reads the Host header</text>
+
+      <line x1="740" y1="222" x2="806" y2="222" class="aflow" marker-end="url(#ara4)"/>
+
+      <rect x="810" y="194" width="90" height="56" rx="8" class="abox"/>
+      <text x="855" y="218" text-anchor="middle" class="t">VM ab12…</text>
+      <text x="855" y="236" text-anchor="middle" class="m">✓ envd</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 4 — the Host-header trick.</b> nginx never cared where the connection came from; it routes purely on the <code>Host</code> header. So the backend connects to the tunneled port and writes the header by hand — no DNS entries, no TLS certificates, nothing to configure on the Mac. One subtlety this design leans on: envd runs commands as <em>root</em> when no auth header is sent, which is how the one-time <code>chown</code> on the volume mount is done.</figcaption>
+  </figure>
+
+  <p>One related discovery, learned the hard way: the modern official <code>e2b</code> JS SDK (v2+) can't talk to this deployment at all — it calls <code>POST /v2/sandboxes</code>, which CubeSandbox answers with 405. So the backend speaks the v1 REST API directly with plain <code>fetch</code>. The same lesson repeated with volumes: the SDKs' ergonomic <code>volume_mounts</code> map is <strong>not</strong> the wire format — the API wants <code>volumeMounts: [{name, path}]</code>, and an unknown field is silently ignored (you get a 201 and no mount).</p>
+</section>
+
+<section>
+  <p class="sec-label">06 · reference</p>
+  <h2>Ports, processes, and where things live</h2>
+  <table>
+    <thead><tr><th>Address</th><th>What it is</th><th>Runs on</th></tr></thead>
+    <tbody>
+      <tr><td>:5173</td><td>Vite dev server (React chat UI); proxies <code>/ws</code> to 8091</td><td>Mac</td></tr>
+      <tr><td>:8091</td><td>Bun backend — WebSocket, sidebar REST, VM session client (<code>vmclaude.ts</code>), serves the built UI, <code>/mcp</code> for docker mode</td><td>Mac</td></tr>
+      <tr><td>claude-poc</td><td>Docker container for the legacy docker backend (<code>CLAUDE_BACKEND=docker</code>); unused in VM mode</td><td>Mac</td></tr>
+      <tr><td>:3000 → :3000</td><td>Cube API — E2B-v1-compatible REST: sandboxes <em>and</em> S3 volumes (create, list, delete)</td><td>EC2, via tunnel</td></tr>
+      <tr><td>:3080 → :80</td><td>nginx (CubeProxy) — routes to each VM's envd (<code>:49983</code>) by Host header: claude stdio, files, watch</td><td>EC2, via tunnel</td></tr>
+      <tr><td>:12088 → :12088</td><td>CubeSandbox WebUI console</td><td>EC2, via tunnel</td></tr>
+    </tbody>
+  </table>
+
+  <pre><code>ssh -i ~/.ssh/onexo-poc-mumbai.pem -N \
+    -L 3000:localhost:3000 -L 3080:localhost:80 -L 12088:localhost:12088 \
+    ubuntu@&lt;EC2_PUBLIC_IP&gt;</code></pre>
+
+  <h3>Isolation, upgraded</h3>
+  <p>In the old design Claude lived in a local Docker container and only the code it <em>ran</em> got a microVM. Now Claude itself runs inside the microVM — its own kernel, on a different machine, per conversation. A container shares the host's kernel; a microVM does not. The blast radius of anything Claude does is one VM plus one volume, both scoped to one tenant, and the VM is destroyed routinely.</p>
+
+  <h3>Operational notes</h3>
+  <ul>
+    <li>The EC2 box fits <strong>~4 lean VMs</strong> (~3 GB each after control-plane overhead); the backend enforces <code>MAX_LIVE_VMS=3</code> and LRU-evicts idle VMs at capacity — losslessly, since files persist.</li>
+    <li>Capacity frees <strong>~10 seconds after</strong> a VM is killed; a create issued too soon gets <code>no more resource</code>. The client retries automatically.</li>
+    <li><strong>Stop, never terminate</strong>, the instance when idle (free-tier credits). The public IP changes on every stop/start — update the tunnel command.</li>
+    <li>The Cube API has no auth configured — acceptable only because the security group admits nothing but SSH from one IP. Never open 3000/80/12088 to the internet as-is.</li>
+    <li>Scaling out = add Cubelet worker nodes (control plane is stateless) + move the backend's conversation registry to Redis. Full plan and cost model: <code>docs/persistent-sessions.md</code>.</li>
+  </ul>
+</section>
+
+<footer>
+  claude-code-poc · architecture notes · September 2026 · details: README.md, docs/aws-cubesandbox.md, docs/persistent-sessions.md
+</footer>
+
+</main>
+</body>
+</html>
