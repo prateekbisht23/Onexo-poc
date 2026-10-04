@@ -78,9 +78,9 @@ export type VmClaudeOpts = {
   // The user's MCP config JSON (from their stored servers), uploaded to the VM
   // and referenced by `--mcp-config /home/user/mcp.json` in claudeArgs.
   mcpConfigJson?: string;
-  // Model-auth env for claude (gateway URL + short-lived token), resolved at
-  // launch. No credentials are ever uploaded into the VM or onto the volume.
-  harnessEnv: () => Promise<Record<string, string>>;
+  // Model-access env + extra args for claude (gateway URL, token helper),
+  // resolved at launch. No credentials are ever uploaded into the VM or onto the volume.
+  harnessLaunch: () => Promise<{ env: Record<string, string>; args: string[] }>;
 };
 
 export const VM_MCP_CONFIG_PATH = "/home/user/mcp.json";
@@ -292,13 +292,10 @@ export class VmClaudeSession {
       `kill $hb 2>/dev/null`,
       `exit $code`,
     ].join("\n");
-    const args = ["-c", script, "claude-wrapper", ...this.opts.claudeArgs];
-    const claudeEnv: Record<string, string> = {
-      HOME: "/home/user",
-      MCP_TIMEOUT: "60000",
-      ...(await this.opts.harnessEnv()),
-    };
+    const launch = await this.opts.harnessLaunch();
     if (this.dead) return void this.destroy();
+    const args = ["-c", script, "claude-wrapper", ...this.opts.claudeArgs, ...launch.args];
+    const claudeEnv: Record<string, string> = { HOME: "/home/user", MCP_TIMEOUT: "60000", ...launch.env };
     const res = await this.envd("/process.Process/Start", {
       method: "POST",
       headers: { "Content-Type": "application/connect+json", "Connect-Protocol-Version": "1" },

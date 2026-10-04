@@ -13,6 +13,7 @@ server/public/
 # Env / secrets
 .env
 .env.*
+*.pem
 # ...but the template is meant to be committed.
 !.env.example
 
