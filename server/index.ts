@@ -400,7 +400,16 @@ function createConv(
     resumeSessionId,
     volumeName,
     launch: async () => {
-      conv.gateway = await openBrokeredSession(gateway, harness.protocol, identity.user, "vm");
+      conv.gateway = await openBrokeredSession(gateway, harness.protocol, identity.user, "vm", (reason) => {
+        log(`conv ${conv.id}: ending turn — ${reason}`);
+        sendToSubs(conv, { type: "error", sessionId: convPublicId(conv), error: `Model gateway: ${reason}` });
+        conv.vm.kill(); // files persist on the volume; the next message starts a fresh VM
+        if (conv.busy) {
+          conv.busy = false;
+          sendToSubs(conv, { type: "done", sessionId: convPublicId(conv), ...(conv.tempId ? { tempId: conv.tempId } : {}), code: 1, stderr: reason });
+        }
+        finalizeConv(conv);
+      });
       const g = harness.gatewayConfig(conv.gateway.conn);
       const args = harness.args({
         resumeSessionId,
@@ -706,7 +715,11 @@ function ensureWatch(conv: Conv) {
 // conversation. Resume is only used to reopen an old conversation.
 async function spawnLocalHarness(ws: ServerWebSocket<SocketData>, resumeSessionId: string | null) {
   ws.data.gateway?.close();
-  ws.data.gateway = await openBrokeredSession(gateway, harness.protocol, ws.data.identity.user, localSandbox.vantage);
+  ws.data.gateway = await openBrokeredSession(gateway, harness.protocol, ws.data.identity.user, localSandbox.vantage, (reason) => {
+    log(`pid=${ws.data.proc?.pid}: ending turn — ${reason}`);
+    sendJson(ws, { type: "error", error: `Model gateway: ${reason}` });
+    ws.data.proc?.kill(); // its exit handler reports done (code≠0) for the interrupted turn
+  });
   const g = harness.gatewayConfig(ws.data.gateway.conn);
   const args = [...harness.args({ resumeSessionId, systemPrompt: ASK_USER_PROMPT, mcpConfig: MCP_CONFIG }), ...g.args];
 

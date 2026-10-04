@@ -49,6 +49,20 @@ VMs reach both Kong and this server through reverse SSH tunnels: `-R 0.0.0.0:180
 
 Each WebSocket connection gets **one persistent claude process** (`claude -p --input-format stream-json`): user messages are written to its stdin as JSON lines and responses stream from its stdout, so follow-up turns skip process startup entirely. `--resume <session-id>` is only used when a conversation is reopened (new tab, reconnect, or picked from the sidebar) — the transcript on disk makes that seamless. Streaming JSON events are relayed to the browser over the WebSocket as they arrive (token-by-token via `--include-partial-messages`).
 
+**Token storm guard** (`server/gateway/broker.ts`): a harness re-runs its token helper on every 401/403, but a gateway's 403 for "model not allowed" / AI policy is not a token problem — claude would retry with backoff for minutes, silently. When one session asks for ≥4 tokens within 30s the broker refuses further tokens and the server ends the turn with a visible `Model gateway: …` error (a VM conversation's VM is released; files stay on the volume).
+
+### Conformance (`server/scripts/conformance.ts`)
+Runs every sandbox × gateway pair through the same scenarios on a fresh, isolated POC server driven over `/ws` like the browser: **plain** reply · **tool** call (Bash) · **long-turn** longer than the token refresh (asserts ≥2 tokens + streamed partials) · **rejected-token** (first token deliberately invalid via `GATEWAY_TEST_REJECT_FIRST_TOKEN=1`; asserts recovery) · **unknown-model** (must fail visibly, not hang; a success is a WARN = silent model swap). With `ONEXO_DATABASE_URL`, Connectra runs must also show `ai_usage_event` rows for their correlation id.
+```bash
+cd server
+ONEXO_DATABASE_URL=<onexo db url> bun scripts/conformance.ts                # local × connectra,bifrost
+bun scripts/conformance.ts --sandboxes cubesandbox --gateways connectra     # needs the tunnels
+bun scripts/conformance.ts --only plain,tool                                # subset
+```
+Report: printed table + `logs/conformance-<ts>.json`; exit 1 on any FAIL. Last local run: 9 PASS, 1 WARN (Connectra silently served another model for an unknown one — OneXO-side fix tracked separately).
+
+VM egress lockdown (VMs may reach only the tunnel ports): [docs/egress-lockdown.md](docs/egress-lockdown.md).
+
 ## Quickstart
 
 ```bash

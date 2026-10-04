@@ -5,7 +5,12 @@
     "moduleResolution": "bundler",
     "strict": true,
     "noEmit": true,
-    "types": ["bun-types"]
+    "types": [
+      "bun-types"
+    ]
   },
-  "include": ["index.ts"]
+  "include": [
+    "index.ts",
+    "scripts/**/*.ts"
+  ]
 }
