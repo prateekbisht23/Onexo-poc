@@ -7,6 +7,8 @@ import type { GatewayProvider, Vantage } from "./types";
 const ONEXO_AUTH_URL = (process.env.ONEXO_AUTH_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "");
 const CLIENT_ID = process.env.SANDBOX_HARNESS_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.SANDBOX_HARNESS_CLIENT_SECRET ?? "";
+// Optional: Connectra's routing/fallback chain resolves the harness's default model names.
+const MODELS = { main: process.env.CONNECTRA_MODEL || undefined, small: process.env.CONNECTRA_SMALL_MODEL || undefined };
 
 // The gateway root (…/llm) per vantage: VMs come through the reverse tunnel.
 const LLM_ROOT: Record<Vantage, string> = {
@@ -64,7 +66,7 @@ export const connectraGateway: GatewayProvider = {
       !DEFAULT_IDENTITY.userId && !Object.keys(IDENTITY_MAP).length && "ONEXO_ACT_USER_ID",
       !LLM_ROOT.vm && "ONEXO_LLM_URL (vm only)",
     ].filter(Boolean);
-    return `connectra auth=${ONEXO_AUTH_URL} llm(vm)=${LLM_ROOT.vm || "(unset)"}` + (missing.length ? `  MISSING: ${missing.join(", ")}` : "");
+    return `connectra auth=${ONEXO_AUTH_URL} llm(vm)=${LLM_ROOT.vm || "(unset)"} model=${MODELS.main ?? "(gateway decides)"}` + (missing.length ? `  MISSING: ${missing.join(", ")}` : "");
   },
   async open(pocUser, vantage) {
     const root = LLM_ROOT[vantage].replace(/\/$/, "");
@@ -73,6 +75,7 @@ export const connectraGateway: GatewayProvider = {
     const correlationId = `poc-${crypto.randomUUID()}`;
     return {
       baseUrls: { anthropic: `${root}/anthropic`, openai: `${root}/v1` },
+      models: MODELS,
       mint: () => mintToken(pocUser),
       headers: { "X-Onexo-Correlation-Id": correlationId },
       correlationId,

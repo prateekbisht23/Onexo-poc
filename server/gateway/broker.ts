@@ -19,6 +19,7 @@ const POC_URL: Record<Vantage, string> = {
 /** Everything a harness adapter needs to point itself at the gateway. Protocol-level only. */
 export type HarnessGatewayConn = {
   baseUrls: Partial<Record<WireProtocol, string>>;
+  models: { main?: string; small?: string };
   headers: Record<string, string>;
   tokenUrl: string;
   helperKey: string;
@@ -46,6 +47,7 @@ export async function openBrokeredSession(
   return {
     conn: {
       baseUrls: upstream.baseUrls,
+      models: upstream.models,
       headers: upstream.headers,
       tokenUrl: `${pocUrl}${GATEWAY_TOKEN_PATH}`,
       helperKey,
