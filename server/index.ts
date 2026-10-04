@@ -5,7 +5,7 @@ import { deleteConversation, getConversation, listConversations, migrate, rename
 import { runCode, sandboxConfigSummary } from "./sandbox";
 import { destroyVolume, VmClaudeSession, VM_MCP_CONFIG_PATH } from "./vmclaude";
 import { addMcpServer, deleteMcpServer, listMcpServers, setMcpEnabled, updateMcpOAuth, upsertOAuthServer, type McpServer } from "./db";
-import { claudeGatewayEnv, gatewayConfigSummary, gatewaySession } from "./gateway";
+import { claudeGatewayArgs, claudeGatewayEnv, gatewayConfigSummary, GATEWAY_TOKEN_PATH, handleGatewayTokenRequest, openGatewaySession, type GatewaySession } from "./gateway";
 import * as mcpOAuth from "./mcp-oauth";
 import { mkdirSync, writeFileSync } from "fs";
 
@@ -43,8 +43,10 @@ const CLAUDE_BACKEND = process.env.CLAUDE_BACKEND ?? "cubesandbox";
 const PUBLIC_DIR = join(import.meta.dir, "public");
 
 // Gateway root as seen by a docker/local claude (the VM path uses ONEXO_LLM_URL — the tunnel).
-const ONEXO_LLM_URL_LOCAL =
-  process.env.ONEXO_LLM_URL_LOCAL ?? `http://${CLAUDE_CONTAINER ? "host.docker.internal" : "127.0.0.1"}:8000/llm`;
+const LOCAL_HOST = CLAUDE_CONTAINER ? "host.docker.internal" : "127.0.0.1";
+const ONEXO_LLM_URL_LOCAL = process.env.ONEXO_LLM_URL_LOCAL ?? `http://${LOCAL_HOST}:8000/llm`;
+// This server as seen by a docker/local claude's token helper.
+const POC_URL_LOCAL = `http://${LOCAL_HOST}:${process.env.PORT ?? 8091}`;
 
 function buildClaudeCommand(args: string[], envKeys: string[] = []): string[] {
   if (CLAUDE_CONTAINER) {
@@ -169,6 +171,7 @@ type SocketData = {
   // vm backend: which conversation this socket is currently viewing
   watching: string | null;
   identity: Identity; // who this connection is (from the identity seam)
+  gateway: GatewaySession | null; // docker backend: the live claude's token-helper session
 };
 
 type ClientMessage =
@@ -297,6 +300,7 @@ type Conv = {
   stopWatch: (() => void) | null; // one envd file-watcher per conv (lazy)
   changed: Set<string>; // paths changed this VM lifetime (for late viewers)
   agentOutputs: Map<string, string>; // agentId → transcript path in the VM (to persist)
+  gateway: GatewaySession | null; // closed in finalizeConv — revokes the VM's token helper key
 };
 
 const convs = new Map<string, Conv>();
@@ -434,6 +438,7 @@ function createConv(
     stopWatch: null,
     changed: new Set(),
     agentOutputs: new Map(),
+    gateway: null,
   };
   const claudeArgs = buildClaudeArgs(resumeSessionId, false);
   if (mcpConfigJson) claudeArgs.push("--mcp-config", VM_MCP_CONFIG_PATH);
@@ -442,7 +447,10 @@ function createConv(
     resumeSessionId,
     volumeName,
     mcpConfigJson,
-    harnessEnv: async () => claudeGatewayEnv(await gatewaySession(identity.user)),
+    harnessLaunch: async () => {
+      conv.gateway = await openGatewaySession(identity.user);
+      return { env: claudeGatewayEnv(conv.gateway), args: claudeGatewayArgs() };
+    },
     onLine: (line) => handleConvLine(conv, line),
     onExit: ({ code, stderrTail }) => {
       log(`conv ${conv.id} ended code=${code}`);
@@ -468,6 +476,8 @@ function createConv(
 // for EXPLICIT kills too (idle/end/evict): an explicit kill() sets dead=true, so
 // the VM's own onExit is suppressed and won't clean the registry on its own.
 function finalizeConv(conv: Conv) {
+  conv.gateway?.close();
+  conv.gateway = null;
   if (conv.idleTimer) { clearTimeout(conv.idleTimer); conv.idleTimer = null; }
   conv.stopWatch?.();
   conv.stopWatch = null;
@@ -734,7 +744,11 @@ function ensureWatch(conv: Conv) {
 // holds the conversation. --resume is only used to reopen an old conversation.
 async function spawnPersistentClaude(ws: ServerWebSocket<SocketData>, resumeSessionId: string | null) {
   const args = buildClaudeArgs(resumeSessionId, true);
-  const gatewayEnv = claudeGatewayEnv(await gatewaySession(ws.data.identity.user, ONEXO_LLM_URL_LOCAL));
+  ws.data.gateway?.close();
+  const gateway = await openGatewaySession(ws.data.identity.user, { llmBaseUrl: ONEXO_LLM_URL_LOCAL, pocUrl: POC_URL_LOCAL });
+  ws.data.gateway = gateway;
+  args.push(...claudeGatewayArgs());
+  const gatewayEnv = claudeGatewayEnv(gateway);
 
   const startedAt = Date.now();
   const proc = Bun.spawn(buildClaudeCommand(args, Object.keys(gatewayEnv)), {
@@ -927,10 +941,14 @@ const server = Bun.serve<SocketData>({
           lastPrompt: "",
           watching: null,
           identity: getIdentity(req),
+          gateway: null,
         } satisfies SocketData,
       });
       if (upgraded) return;
       return new Response("WebSocket upgrade failed", { status: 400 });
+    }
+    if (url.pathname === GATEWAY_TOKEN_PATH) {
+      return handleGatewayTokenRequest(req);
     }
     if (url.pathname === "/health") {
       return Response.json({ ok: true, projectsDir: PROJECTS_DIR });
@@ -1057,6 +1075,8 @@ const server = Bun.serve<SocketData>({
       for (const c of convs.values()) c.subscribers.delete(ws);
       ws.data.proc?.kill();
       ws.data.proc = null;
+      ws.data.gateway?.close();
+      ws.data.gateway = null;
     },
   },
 });
