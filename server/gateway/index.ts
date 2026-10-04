@@ -1,9 +1,11 @@
 // GATEWAY=<name> picks the provider. Adding one = a new file + an entry here.
+import { bifrostGateway } from "./bifrost";
 import { connectraGateway } from "./connectra";
 import type { GatewayProvider } from "./types";
 
 const PROVIDERS: Record<string, GatewayProvider> = {
   [connectraGateway.name]: connectraGateway,
+  [bifrostGateway.name]: bifrostGateway,
 };
 
 export function selectGateway(name = process.env.GATEWAY ?? "connectra"): GatewayProvider {

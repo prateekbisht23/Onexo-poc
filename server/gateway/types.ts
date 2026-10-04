@@ -12,6 +12,8 @@ export type GatewayUpstream = {
   baseUrls: Partial<Record<WireProtocol, string>>;
   /** Fresh bearer for one call batch. Called on every helper refresh and after any 401. */
   mint: () => Promise<string>;
+  /** Model ids to request. Unset = let the gateway route the harness's own default names. */
+  models: { main?: string; small?: string };
   /** Extra request headers every call must carry (e.g. the correlation id). */
   headers: Record<string, string>;
   correlationId: string;

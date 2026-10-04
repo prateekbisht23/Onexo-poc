@@ -2,9 +2,6 @@
 // via ANTHROPIC_BASE_URL + an apiKeyHelper that fetches tokens from the broker.
 import type { HarnessAdapter } from "./types";
 
-const GATEWAY_MODEL = process.env.GATEWAY_MODEL ?? "";
-const GATEWAY_SMALL_MODEL = process.env.GATEWAY_SMALL_MODEL ?? "";
-
 // Runs inside the VM/container: curl where present (docker image), node otherwise (VM template).
 const HELPER_CMD =
   `curl -sf -H "authorization: Bearer $ONEXO_HELPER_KEY" "$ONEXO_TOKEN_URL" || ` +
@@ -41,8 +38,8 @@ export const claudeCli: HarnessAdapter = {
       ONEXO_TOKEN_URL: c.tokenUrl,
       ONEXO_HELPER_KEY: c.helperKey,
     };
-    if (GATEWAY_MODEL) env.ANTHROPIC_MODEL = GATEWAY_MODEL;
-    if (GATEWAY_SMALL_MODEL) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = GATEWAY_SMALL_MODEL;
+    if (c.models.main) env.ANTHROPIC_MODEL = c.models.main;
+    if (c.models.small) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = c.models.small;
     // inline --settings, never a settings file: the docker backend mounts the user's real ~/.claude
     return { env, args: ["--settings", JSON.stringify({ apiKeyHelper: HELPER_CMD })] };
   },

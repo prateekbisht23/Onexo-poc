@@ -29,9 +29,11 @@ Three independent seams, each picked by one env var; none knows which of the oth
 |---|---|---|---|
 | **Sandbox** — where the agent runs | `SANDBOX` | `cubesandbox` (default), `docker`, `local` | `server/sandbox/` |
 | **Harness** — the coding-agent CLI running the loop | `HARNESS` | `claude-cli` (default) | `server/harness/` |
-| **Gateway** — where model calls go | `GATEWAY` | `connectra` (default) | `server/gateway/` |
+| **Gateway** — where model calls go | `GATEWAY` | `connectra` (default), `bifrost` | `server/gateway/` |
 
 The only contract between a harness and a gateway is protocol-level (`HarnessGatewayConn`: base URL per wire protocol, extra headers, the token-helper URL + key, refresh period). A gateway provider implements `open(user, vantage)` → base URLs + `mint()`; a harness adapter implements its CLI's args, stdio encoding and `gatewayConfig(conn)`; the sandbox runs "a binary with args + env + setup files" and never knows it's claude. Adding a gateway or harness is one file plus one registry entry.
+
+**Gateway swap, verified:** the same claude-cli harness and chat run unchanged against `GATEWAY=connectra` (Kong → Connectra → Bifrost: per-user token, metered as an `ai_usage_event`, Connectra's fallback chain picks the model) and `GATEWAY=bifrost` (straight to Bifrost with one virtual key: no OneXO identity or metering, explicit `BIFROST_MODEL`). `bifrost` is a dev-only comparison point (`// PROTOTYPE:`), not a production path.
 
 Per-conversation flow: the first message creates a fresh microVM (~0.3 s) **with a persistent S3 volume mounted at `/home/user/projects`**, injects auth, and starts a persistent claude with stream-json stdio carried over envd's streaming RPC through the tunnel. After every turn the transcript `.jsonl` is downloaded into `~/.claude/projects/vm-claude/`, so the sidebar history works and reopening a conversation later re-mounts the same volume into a new VM and `--resume`s — claude keeps both its memory **and its files** even though the old VM is gone.
 
@@ -39,7 +41,7 @@ Per-conversation flow: the first message creates a fresh microVM (~0.3 s) **with
 Each conversation gets its own CubeSandbox **S3 volume** (`vol-<org>-<user>-<id>`), created on first message and mounted at `/home/user/projects`. Files written by Claude persist there, survive VM teardown, and are restored when the conversation is reopened in a fresh VM. The volume is created via `POST /volumes {name,driver:"s3"}` and attached with `volumeMounts:[{name,path}]` on sandbox create; because it mounts root-owned, the backend runs a one-time `chown user:user` (as root, via envd with no auth header) at startup so Claude (running as `user`) can write. Lifecycle: **idle timeout ~5 min** and **LRU eviction** at capacity tear the VM down losslessly (files are on the volume); the **"End session" button** in the chat header kills the current conversation's VM immediately but keeps the volume (next message restarts it); "Delete conversation" also `Volume.destroy()`s it. The header button is enabled only when a live VM exists for the open conversation and no turn is running. Volume id/tenant are stored in `conversations` (migration 002).
 
 ### Model access: OneXO AI gateway only
-Claude never holds a provider key, a claude.ai login, or the OneXO client secret. Every model call goes **claude → OneXO Kong (`/llm/anthropic`) → Connectra → whichever provider the gateway routes to**, and **which model serves a call is the gateway's decision** (`GATEWAY_MODEL`/`GATEWAY_SMALL_MODEL` are optional overrides).
+Claude never holds a provider key, a claude.ai login, or the OneXO client secret. Every model call goes **claude → OneXO Kong (`/llm/anthropic`) → Connectra → whichever provider the gateway routes to**, and **which model serves a call is the gateway's decision** (`CONNECTRA_MODEL`/`CONNECTRA_SMALL_MODEL` are optional overrides). Model choice belongs to the gateway plug: each provider returns `models` hints and the harness only applies them.
 
 Tokens (`server/gateway/broker.ts` + `connectra.ts`): each claude launch opens a gateway session with a random **helper key** scoped to that POC user. Claude's `apiKeyHelper` (passed inline via `--settings`, never written to a settings file) trades that key at this server's `/internal/gateway-token` for a fresh short-lived OneXO token — `client_credentials` as `onexo-sandbox-harness-7c31e5`, delegated via `act_user_id`/`act_tenant_id` so spend is metered per user. Claude re-runs the helper every `GATEWAY_TOKEN_REFRESH_S` (600s, below the 900s TTL) **and on any 401**, so a turn longer than the token's lifetime keeps going with no restart. When the VM/process ends the session is closed and the key stops working. Env injected: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` (`X-Onexo-Correlation-Id`), `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `ONEXO_TOKEN_URL`, `ONEXO_HELPER_KEY`. Nothing is written into the VM or onto the volume.
 
@@ -93,7 +95,10 @@ Requires `~/projects` on the host (bind-mounted as Claude's working directory).
 | `ONEXO_LLM_URL_CONTAINER` / `ONEXO_LLM_URL_HOST` | `http://host.docker.internal:8000/llm` / `http://127.0.0.1:8000/llm` | gateway root for `SANDBOX=docker` / `local` |
 | `SANDBOX_HARNESS_CLIENT_ID` / `_SECRET` | _(required)_ | OneXO client (`ai:i ai:dg`) used to mint tokens |
 | `ONEXO_ACT_USER_ID` / `ONEXO_ACT_TENANT_ID` | _(required)_ | OneXO user/tenant the POC user's spend is metered to (`ONEXO_IDENTITY_MAP` for per-user) |
-| `GATEWAY_MODEL` / `GATEWAY_SMALL_MODEL` | _(unset)_ | optional model overrides; unset = the gateway decides |
+| `CONNECTRA_MODEL` / `CONNECTRA_SMALL_MODEL` | _(unset)_ | optional model overrides for `GATEWAY=connectra`; unset = Connectra's routing decides |
+| `BIFROST_VK` | _(required for bifrost)_ | Bifrost virtual key for `GATEWAY=bifrost` |
+| `BIFROST_MODEL` / `BIFROST_SMALL_MODEL` | _(main required)_ | explicit `provider/model` ids — Bifrost has no fallback chain to resolve the CLI's default names |
+| `BIFROST_URL_VM` / `_CONTAINER` / `_HOST` | — / `http://host.docker.internal:8080` / `http://127.0.0.1:8080` | Bifrost root per sandbox vantage (VMs need a tunnel, e.g. `-R 0.0.0.0:18080:localhost:8080`) |
 | `SANDBOX_SESSION_TIMEOUT_S` | `7200` | microVM hard lifetime (safety net if a kill is missed) |
 | `VM_IDLE_TTL_S` | `300` | release a conversation's VM after this long idle (resume re-mounts the volume) |
 | `MAX_LIVE_VMS` | `3` | live-VM ceiling per node; new sessions past it evict the LRU idle VM |
