@@ -7,5 +7,3 @@ services:
     volumes:
       - ${HOME}/.claude:/home/onexo/.claude
       - ${HOME}/projects:/home/onexo/projects
-    environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}

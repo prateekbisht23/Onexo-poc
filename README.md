@@ -27,14 +27,8 @@ Per-conversation flow: the first message creates a fresh microVM (~0.3 s) **with
 ### Persistent storage (S3 volumes)
 Each conversation gets its own CubeSandbox **S3 volume** (`vol-<org>-<user>-<id>`), created on first message and mounted at `/home/user/projects`. Files written by Claude persist there, survive VM teardown, and are restored when the conversation is reopened in a fresh VM. The volume is created via `POST /volumes {name,driver:"s3"}` and attached with `volumeMounts:[{name,path}]` on sandbox create; because it mounts root-owned, the backend runs a one-time `chown user:user` (as root, via envd with no auth header) at startup so Claude (running as `user`) can write. Lifecycle: **idle timeout ~5 min** and **LRU eviction** at capacity tear the VM down losslessly (files are on the volume); the **"End session" button** in the chat header kills the current conversation's VM immediately but keeps the volume (next message restarts it); "Delete conversation" also `Volume.destroy()`s it. The header button is enabled only when a live VM exists for the open conversation and no turn is running. Volume id/tenant are stored in `conversations` (migration 002).
 
-### Auth: three ways to authenticate the VMs
-Precedence at launch: **`ANTHROPIC_API_KEY`** (env) → OAuth credentials from `/login` / the container → nothing (VM will fail auth). Credentials are always injected fresh at launch and never persisted on the volume.
-
-1. **`ANTHROPIC_API_KEY`** in the backend env — non-expiring, no rotation; the only option that cleanly supports a fleet of concurrent VMs.
-2. **Dashboard `/login`** (OAuth, no `docker exec`) — type `/login` in the chat; the backend runs Claude Code's Authorization-Code + PKCE **copy/paste** flow (`server/oauth.ts`): it returns a `claude.ai/oauth/authorize` link, you approve on Anthropic, paste the code into the login card, and the backend exchanges it and writes `~/.claude/.credentials.json`. New sessions pick it up. Implemented backend-side because headless Claude in the VM has no `/login`.
-3. **Container login** (original) — `docker exec -it claude-poc claude` → `/login`.
-
-OAuth subscription tokens use **rotating refresh tokens**, so a single login is inherently serial — fine for the PoC (a `syncCredentials()` write-back carries the rotation forward across VMs), but for many concurrent VMs use an API key, or move to per-user tokens with central refresh (see the plan). `/login` is currently single-user (writes the shared creds file); the multi-tenant version keys credentials per user from `getIdentity()`.
+### Model access: OneXO AI gateway only
+Claude never holds a provider key or a claude.ai login. Every model call goes **claude → OneXO Kong (`/llm/anthropic`) → Connectra → whichever provider the gateway routes to**. At each claude launch `server/gateway.ts` mints a short-lived OneXO token (`client_credentials` as `onexo-sandbox-harness-7c31e5`, delegated to the mapped OneXO user/tenant via `act_user_id`/`act_tenant_id`, so spend is metered per user) and injects it as env only — `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS` (`X-Onexo-Correlation-Id`), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Nothing is written into the VM or onto the volume. **Which model serves a call is the gateway's decision**; `GATEWAY_MODEL`/`GATEWAY_SMALL_MODEL` are optional overrides. VMs reach Kong through a reverse SSH tunnel (`-R 0.0.0.0:18000:localhost:8000`), so `ONEXO_LLM_URL` is the tunnel as seen from inside the VM. Config: `server/.env.example`.
 
 Each WebSocket connection gets **one persistent claude process** (`claude -p --input-format stream-json`): user messages are written to its stdin as JSON lines and responses stream from its stdout, so follow-up turns skip process startup entirely. `--resume <session-id>` is only used when a conversation is reopened (new tab, reconnect, or picked from the sidebar) — the transcript on disk makes that seamless. Streaming JSON events are relayed to the browser over the WebSocket as they arrive (token-by-token via `--include-partial-messages`).
 
@@ -44,8 +38,8 @@ Each WebSocket connection gets **one persistent claude process** (`claude -p --i
 # 1. Container (Claude runtime)
 docker compose up -d --build
 
-# 2. One-time login inside the container (or export ANTHROPIC_API_KEY first)
-docker exec -it claude-poc claude    # → /login → /exit
+# 2. Gateway config: copy server/.env.example → server/.env and fill it in
+#    (needs local OneXO running; client secret from onexo_v1's scripts/seed-sandbox-harness-client.ts)
 
 # 3. Backend on the host
 cd server && bun install && bun run dev          # port 8091
@@ -75,7 +69,12 @@ Requires `~/projects` on the host (bind-mounted as Claude's working directory).
 | `CLAUDE_BIN` | `claude` | claude binary name/path |
 | `CLAUDE_BACKEND` | `cubesandbox` | `cubesandbox` = one microVM per conversation; `docker` = shared local container |
 | `CLAUDE_VM_TEMPLATE` | `claude-code` | CubeSandbox template holding node + Claude Code + envd |
-| `ANTHROPIC_API_KEY` | _(unset)_ | if set, injected per VM session as Claude's auth (fleet-safe); else falls back to the OAuth creds file |
+| `ONEXO_AUTH_URL` | `http://127.0.0.1:8000` | OneXO Kong, where this server mints gateway tokens |
+| `ONEXO_LLM_URL` | _(required)_ | gateway root (`…/llm`) as seen from inside the VM — the reverse tunnel |
+| `ONEXO_LLM_URL_LOCAL` | `http://host.docker.internal:8000/llm` | gateway root for the docker/local backend |
+| `SANDBOX_HARNESS_CLIENT_ID` / `_SECRET` | _(required)_ | OneXO client (`ai:i ai:dg`) used to mint tokens |
+| `ONEXO_ACT_USER_ID` / `ONEXO_ACT_TENANT_ID` | _(required)_ | OneXO user/tenant the POC user's spend is metered to (`ONEXO_IDENTITY_MAP` for per-user) |
+| `GATEWAY_MODEL` / `GATEWAY_SMALL_MODEL` | _(unset)_ | optional model overrides; unset = the gateway decides |
 | `SANDBOX_SESSION_TIMEOUT_S` | `7200` | microVM hard lifetime (safety net if a kill is missed) |
 | `VM_IDLE_TTL_S` | `300` | release a conversation's VM after this long idle (resume re-mounts the volume) |
 | `MAX_LIVE_VMS` | `3` | live-VM ceiling per node; new sessions past it evict the LRU idle VM |
@@ -90,7 +89,7 @@ Frontend: `VITE_WS_TARGET` overrides where vite proxies `/ws` (default `ws://127
 
 ## Auth
 
-On macOS, Claude Code stores credentials in the **Keychain**, not in `~/.claude` — so mounting `~/.claude` brings your settings/history but NOT auth. Either export `ANTHROPIC_API_KEY`, or do the one-time `/login` inside the container: Linux writes `~/.claude/.credentials.json` into the mounted dir, so it persists across rebuilds.
+Model auth is the OneXO gateway token described above — no `/login`, no `ANTHROPIC_API_KEY`, no Keychain. If claude fails with a 401, the token mint failed or expired (check the backend log line `AI gateway: …` for missing config).
 
 ## WebSocket protocol (`/ws` on the backend)
 
