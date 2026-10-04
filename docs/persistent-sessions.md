@@ -74,7 +74,7 @@ Notes:
 | Step | What | Status |
 |---|---|---|
 | 0 | Live verification: volume create → mount → write → destroy VM → remount → file survives. Captured the REST shapes. | ✅ Done |
-| 1 | Volume lifecycle in `server/vmclaude.ts` — create/reuse per-session volume, mount at `/home/user/projects`, one-time `chown`, ephemeral credentials | ✅ Done |
+| 1 | Volume lifecycle in `server/sandbox/cubesandbox.ts` — create/reuse per-session volume, mount at `/home/user/projects`, one-time `chown`, ephemeral credentials | ✅ Done |
 | 2 | Lifecycle in `server/index.ts` — `getIdentity()` seam, conversation→volume mapping, 5-min idle, LRU eviction, End session / Delete conversation | ✅ Done |
 | 3 | Per-user MCP config → `--mcp-config` at VM launch | Planned |
 | 4 | Scale-out: registry → Redis, backend replicas behind LB, add Cubelet worker nodes, managed RDS/ElastiCache/S3 | When needed |

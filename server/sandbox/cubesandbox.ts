@@ -1,14 +1,15 @@
-// Persistent Claude Code sessions inside CubeSandbox microVMs.
+// The CubeSandbox plug: one KVM microVM per conversation running a harness CLI.
 //
 // One conversation = one microVM: created on the first message, killed when the
-// socket closes or the conversation switches. Claude runs inside the VM as user
-// "user" (bypassPermissions refuses root) with stream-json stdio carried over
-// envd's connect-RPC API (:49983), reached through the SSH tunnel + CubeProxy
-// Host-header routing — same trick as sandbox.ts, but with a long-lived stream.
+// conversation ends. The harness runs inside the VM as user "user" (claude's
+// bypassPermissions refuses root) with its stdio carried over envd's connect-RPC
+// API (:49983), reached through the SSH tunnel + CubeProxy Host-header routing —
+// same trick as ../sandbox.ts, but with a long-lived stream. Harness-agnostic:
+// the binary, args, env, setup files and transcript location come from launch().
 //
-// Transcript continuity: after each turn the session .jsonl is downloaded from
-// the VM into ~/.claude/projects/vm-claude/, where the existing history API
-// finds it; resuming uploads it back into the fresh VM before `--resume`.
+// Transcript continuity: after each turn the session transcript is downloaded from
+// the VM into TRANSCRIPT_STORE, where the history API finds it; resuming uploads it
+// back into the fresh VM before the harness resumes.
 import { join, normalize } from "path";
 import { mkdirSync } from "fs";
 
@@ -24,14 +25,14 @@ const FS_EVENT_MAP: Record<string, FsChangeKind> = {
 
 const E2B_API_URL = process.env.E2B_API_URL ?? "http://localhost:3000";
 const CUBE_PROXY_URL = process.env.CUBE_PROXY_URL ?? "http://localhost:3080";
-const CLAUDE_TEMPLATE = process.env.CLAUDE_VM_TEMPLATE ?? "claude-code";
+const VM_TEMPLATE = process.env.VM_TEMPLATE ?? "claude-code";
 const SANDBOX_DOMAIN = process.env.CUBE_SANDBOX_DOMAIN ?? "cube.app";
 const SESSION_TIMEOUT_S = Number(process.env.SANDBOX_SESSION_TIMEOUT_S ?? 7200);
 const CLAUDE_DIR = process.env.CLAUDE_DIR ?? join(process.env.HOME ?? "/", ".claude");
-const LOCAL_TRANSCRIPT_DIR = join(CLAUDE_DIR, "projects", "vm-claude");
-// claude's cwd inside the VM; its transcripts land under this munged name
-const VM_CWD = "/home/user/projects";
-const VM_PROJECT_DIR = "/home/user/.claude/projects/-home-user-projects";
+// Host-side copies of VM transcripts (the history API scans CLAUDE_DIR/projects/*).
+export const TRANSCRIPT_STORE = join(CLAUDE_DIR, "projects", "vm-claude");
+export const VM_HOME = "/home/user";
+export const VM_CWD = "/home/user/projects";
 const ENVD_AUTH = "Basic " + btoa("user:");
 const HEARTBEAT_MARK = "__cube_hb__";
 
@@ -66,8 +67,14 @@ async function* frames(body: ReadableStream<Uint8Array>) {
   }
 }
 
-export type VmClaudeOpts = {
-  claudeArgs: string[]; // args after the binary name
+export type VmLaunch = {
+  bin: string;
+  args: string[];
+  env: Record<string, string>;
+  files: Record<string, string>; // absolute VM path → content, written before launch
+};
+
+export type VmHarnessOpts = {
   resumeSessionId: string | null;
   onLine: (line: string) => void; // one stdout line (stream-json event)
   onExit: (detail: { code: number; stderrTail: string }) => void;
@@ -75,12 +82,11 @@ export type VmClaudeOpts = {
   // Persistent S3 volume for this conversation's files (mounted at VM_CWD).
   // Server-minted, stable across resumes; created on demand, reused thereafter.
   volumeName?: string;
-  // The user's MCP config JSON (from their stored servers), uploaded to the VM
-  // and referenced by `--mcp-config /home/user/mcp.json` in claudeArgs.
-  mcpConfigJson?: string;
-  // Model-access env + extra args for claude (gateway URL, token helper),
-  // resolved at launch. No credentials are ever uploaded into the VM or onto the volume.
-  harnessLaunch: () => Promise<{ env: Record<string, string>; args: string[] }>;
+  // Resolved once the VM is up. Never carries credentials into files or the volume —
+  // model access is env-only (gateway URL + token-helper key).
+  launch: () => Promise<VmLaunch>;
+  // Where the harness keeps a session's transcript inside the VM.
+  transcriptPath: (sessionId: string) => string;
 };
 
 export const VM_MCP_CONFIG_PATH = "/home/user/mcp.json";
@@ -168,16 +174,16 @@ export async function destroyVolume(name: string): Promise<void> {
   }).catch(() => {});
 }
 
-export class VmClaudeSession {
+export class VmHarnessSession {
   sandboxId: string | null = null;
   private pid = 0;
   private pending: string[] = [];
   private dead = false;
   private stderrTail = "";
   private abort = new AbortController();
-  private opts: VmClaudeOpts;
+  private opts: VmHarnessOpts;
 
-  constructor(opts: VmClaudeOpts) {
+  constructor(opts: VmHarnessOpts) {
     this.opts = opts;
     this.init().catch((err) => {
       this.opts.log(`vm session failed to start: ${err}`);
@@ -214,7 +220,7 @@ export class VmClaudeSession {
       const res = await this.api("/sandboxes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ templateID: CLAUDE_TEMPLATE, timeout: SESSION_TIMEOUT_S, ...(volumeMounts ? { volumeMounts } : {}) }),
+        body: JSON.stringify({ templateID: VM_TEMPLATE, timeout: SESSION_TIMEOUT_S, ...(volumeMounts ? { volumeMounts } : {}) }),
         signal: AbortSignal.timeout(60_000),
       });
       const body = await res.text();
@@ -263,47 +269,42 @@ export class VmClaudeSession {
       }
     }
 
-    // 3. inject config (+ transcript when resuming). Model auth is env-only (step 4).
-    await this.uploadFile(
-      "/home/user/.claude.json",
-      JSON.stringify({ hasCompletedOnboarding: true, bypassPermissionsModeAccepted: true }),
-    );
-    if (this.opts.mcpConfigJson) {
-      await this.uploadFile(VM_MCP_CONFIG_PATH, this.opts.mcpConfigJson);
-    }
+    // 3. resolve the launch, then write its setup files and guardrail hooks
+    //    (+ transcript when resuming).
+    const launch = await this.opts.launch();
+    if (this.dead) return void this.destroy();
+    for (const [path, content] of Object.entries(launch.files)) await this.uploadFile(path, content);
     await this.uploadGuardrails();
     if (this.opts.resumeSessionId) {
-      const local = Bun.file(join(LOCAL_TRANSCRIPT_DIR, `${this.opts.resumeSessionId}.jsonl`));
+      const local = Bun.file(join(TRANSCRIPT_STORE, `${this.opts.resumeSessionId}.jsonl`));
       if (await local.exists()) {
-        await this.uploadFile(`${VM_PROJECT_DIR}/${this.opts.resumeSessionId}.jsonl`, await local.text());
+        await this.uploadFile(this.opts.transcriptPath(this.opts.resumeSessionId), await local.text());
       } else {
         this.opts.log(`vm resume: no local transcript for ${this.opts.resumeSessionId}, starting fresh`);
       }
     }
     if (this.dead) return void this.destroy();
 
-    // 4. start claude under a heartbeat wrapper (keeps the stream alive
-    //    through nginx/tunnel idle timeouts while the user is thinking)
+    // 4. start the harness under a heartbeat wrapper (keeps the stream alive
+    //    through nginx/tunnel idle timeouts while the user is thinking); $0 is the binary.
     const script = [
       `(while true; do sleep 25; printf '${HEARTBEAT_MARK}\\n' >&2; done) &`,
       `hb=$!`,
-      `claude "$@"`,
+      `"$0" "$@"`,
       `code=$?`,
       `kill $hb 2>/dev/null`,
       `exit $code`,
     ].join("\n");
-    const launch = await this.opts.harnessLaunch();
-    if (this.dead) return void this.destroy();
-    const args = ["-c", script, "claude-wrapper", ...this.opts.claudeArgs, ...launch.args];
-    const claudeEnv: Record<string, string> = { HOME: "/home/user", MCP_TIMEOUT: "60000", ...launch.env };
+    const args = ["-c", script, launch.bin, ...launch.args];
+    const harnessEnv: Record<string, string> = { HOME: VM_HOME, MCP_TIMEOUT: "60000", ...launch.env };
     const res = await this.envd("/process.Process/Start", {
       method: "POST",
       headers: { "Content-Type": "application/connect+json", "Connect-Protocol-Version": "1" },
-      body: envelope({ process: { cmd: "/bin/bash", args, envs: claudeEnv, cwd: VM_CWD } }) as unknown as BodyInit,
+      body: envelope({ process: { cmd: "/bin/bash", args, envs: harnessEnv, cwd: VM_CWD } }) as unknown as BodyInit,
       signal: this.abort.signal,
     });
     if (res.status !== 200 || !res.body) {
-      throw new Error(`claude start failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+      throw new Error(`harness start failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
     }
     this.consumeStream(res.body);
   }
@@ -415,7 +416,7 @@ export class VmClaudeSession {
     }
   }
 
-  /** Write one stream-json line to claude's stdin (buffered until it's up). */
+  /** Write one line to the harness's stdin (buffered until it's up). */
   writeLine(line: string) {
     const data = line.endsWith("\n") ? line : line + "\n";
     if (this.pid) this.sendStdin(data);
@@ -466,11 +467,12 @@ export class VmClaudeSession {
     return res.text();
   }
 
-  /** Read a background sub-agent's JSONL transcript file (…/tasks/<id>.output). */
-  async readAgentOutput(path: string): Promise<string | null> {
+  /** Read a file under the VM's HOME (harness state such as sub-agent transcripts); null if absent. */
+  async readHomeFile(path: string): Promise<string | null> {
     if (!this.sandboxId || this.dead) return null;
-    if (!/\/tasks\/[A-Za-z0-9_-]+\.output$/.test(path)) throw new Error("not an agent output path");
-    const res = await this.envd(`/files?path=${encodeURIComponent(path)}&username=user`, { signal: AbortSignal.timeout(15_000) });
+    const abs = normalize(path);
+    if (!abs.startsWith(VM_HOME + "/")) throw new Error(`path outside the VM home: ${path}`);
+    const res = await this.envd(`/files?path=${encodeURIComponent(abs)}&username=user`, { signal: AbortSignal.timeout(15_000) });
     if (res.status !== 200) return null;
     return res.text();
   }
@@ -528,12 +530,12 @@ export class VmClaudeSession {
     if (!this.sandboxId || this.dead) return;
     try {
       const res = await this.envd(
-        `/files?path=${encodeURIComponent(`${VM_PROJECT_DIR}/${sessionId}.jsonl`)}&username=user`,
+        `/files?path=${encodeURIComponent(this.opts.transcriptPath(sessionId))}&username=user`,
         { signal: AbortSignal.timeout(20_000) },
       );
       if (res.status !== 200) return;
-      mkdirSync(LOCAL_TRANSCRIPT_DIR, { recursive: true });
-      await Bun.write(join(LOCAL_TRANSCRIPT_DIR, `${sessionId}.jsonl`), await res.arrayBuffer());
+      mkdirSync(TRANSCRIPT_STORE, { recursive: true });
+      await Bun.write(join(TRANSCRIPT_STORE, `${sessionId}.jsonl`), await res.arrayBuffer());
     } catch (err) {
       this.opts.log(`transcript sync failed for ${sessionId}: ${err}`);
     }

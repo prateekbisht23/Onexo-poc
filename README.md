@@ -8,7 +8,7 @@ Browser — React chat
    ▼
 Bun backend on the HOST — port 8091 (WebSocket + serves the web build)
    │
-   │  CLAUDE_BACKEND=cubesandbox (default)          CLAUDE_BACKEND=docker
+   │  SANDBOX=cubesandbox (default)                 SANDBOX=docker
    │  one microVM per conversation                  shared local container
    ▼                                                 ▼
 SSH tunnel → AWS EC2 (Mumbai)                 docker exec -i claude-poc claude …
@@ -22,6 +22,17 @@ SSH tunnel → AWS EC2 (Mumbai)                 docker exec -i claude-poc claude
 └───────────────────────────────────────────────────────────────┘
 ```
 
+### Plugs: sandbox × harness × gateway
+Three independent seams, each picked by one env var; none knows which of the others it is paired with:
+
+| Plug | Env | Options | Code |
+|---|---|---|---|
+| **Sandbox** — where the agent runs | `SANDBOX` | `cubesandbox` (default), `docker`, `local` | `server/sandbox/` |
+| **Harness** — the coding-agent CLI running the loop | `HARNESS` | `claude-cli` (default) | `server/harness/` |
+| **Gateway** — where model calls go | `GATEWAY` | `connectra` (default) | `server/gateway/` |
+
+The only contract between a harness and a gateway is protocol-level (`HarnessGatewayConn`: base URL per wire protocol, extra headers, the token-helper URL + key, refresh period). A gateway provider implements `open(user, vantage)` → base URLs + `mint()`; a harness adapter implements its CLI's args, stdio encoding and `gatewayConfig(conn)`; the sandbox runs "a binary with args + env + setup files" and never knows it's claude. Adding a gateway or harness is one file plus one registry entry.
+
 Per-conversation flow: the first message creates a fresh microVM (~0.3 s) **with a persistent S3 volume mounted at `/home/user/projects`**, injects auth, and starts a persistent claude with stream-json stdio carried over envd's streaming RPC through the tunnel. After every turn the transcript `.jsonl` is downloaded into `~/.claude/projects/vm-claude/`, so the sidebar history works and reopening a conversation later re-mounts the same volume into a new VM and `--resume`s — claude keeps both its memory **and its files** even though the old VM is gone.
 
 ### Persistent storage (S3 volumes)
@@ -30,7 +41,7 @@ Each conversation gets its own CubeSandbox **S3 volume** (`vol-<org>-<user>-<id>
 ### Model access: OneXO AI gateway only
 Claude never holds a provider key, a claude.ai login, or the OneXO client secret. Every model call goes **claude → OneXO Kong (`/llm/anthropic`) → Connectra → whichever provider the gateway routes to**, and **which model serves a call is the gateway's decision** (`GATEWAY_MODEL`/`GATEWAY_SMALL_MODEL` are optional overrides).
 
-Tokens (`server/gateway.ts`): each claude launch opens a gateway session with a random **helper key** scoped to that POC user. Claude's `apiKeyHelper` (passed inline via `--settings`, never written to a settings file) trades that key at this server's `/internal/gateway-token` for a fresh short-lived OneXO token — `client_credentials` as `onexo-sandbox-harness-7c31e5`, delegated via `act_user_id`/`act_tenant_id` so spend is metered per user. Claude re-runs the helper every `GATEWAY_TOKEN_REFRESH_S` (600s, below the 900s TTL) **and on any 401**, so a turn longer than the token's lifetime keeps going with no restart. When the VM/process ends the session is closed and the key stops working. Env injected: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` (`X-Onexo-Correlation-Id`), `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `ONEXO_TOKEN_URL`, `ONEXO_HELPER_KEY`. Nothing is written into the VM or onto the volume.
+Tokens (`server/gateway/broker.ts` + `connectra.ts`): each claude launch opens a gateway session with a random **helper key** scoped to that POC user. Claude's `apiKeyHelper` (passed inline via `--settings`, never written to a settings file) trades that key at this server's `/internal/gateway-token` for a fresh short-lived OneXO token — `client_credentials` as `onexo-sandbox-harness-7c31e5`, delegated via `act_user_id`/`act_tenant_id` so spend is metered per user. Claude re-runs the helper every `GATEWAY_TOKEN_REFRESH_S` (600s, below the 900s TTL) **and on any 401**, so a turn longer than the token's lifetime keeps going with no restart. When the VM/process ends the session is closed and the key stops working. Env injected: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` (`X-Onexo-Correlation-Id`), `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `ONEXO_TOKEN_URL`, `ONEXO_HELPER_KEY`. Nothing is written into the VM or onto the volume.
 
 VMs reach both Kong and this server through reverse SSH tunnels: `-R 0.0.0.0:18000:localhost:8000` (`ONEXO_LLM_URL`) and `-R 0.0.0.0:18091:localhost:8091` (`POC_URL_FROM_VM`). Config: `server/.env.example`.
 
@@ -52,7 +63,7 @@ cd server && bun install && bun run dev          # port 8091
 cd web && bun install && bun run dev             # port 5173, /ws proxied to 8091
 
 # 5. Sandbox tunnel — REQUIRED for the default microVM backend
-#    (without it, set CLAUDE_BACKEND=docker to use the local container)
+#    (without it, set SANDBOX=docker to use the local container)
 ssh -i ~/.ssh/onexo-poc-mumbai.pem -N \
   -L 3000:localhost:3000 -L 3080:localhost:80 -L 12088:localhost:12088 \
   ubuntu@<EC2_PUBLIC_IP>
@@ -67,17 +78,19 @@ Requires `~/projects` on the host (bind-mounted as Claude's working directory).
 | var | default | meaning |
 |---|---|---|
 | `PORT` | `8091` | backend port (8080 is unusable on this machine — held by another container) |
-| `CLAUDE_CONTAINER` | `claude-poc` | container to `docker exec` into; set to empty to run claude locally on the host |
+| `DOCKER_CONTAINER` | `claude-poc` | container to `docker exec` into (`SANDBOX=docker`) |
 | `CONTAINER_WORKDIR` | `/home/onexo/projects` | claude's cwd inside the container |
 | `PROJECTS_DIR` | `~/projects` | claude's cwd in local mode |
 | `CLAUDE_BIN` | `claude` | claude binary name/path |
-| `CLAUDE_BACKEND` | `cubesandbox` | `cubesandbox` = one microVM per conversation; `docker` = shared local container |
-| `CLAUDE_VM_TEMPLATE` | `claude-code` | CubeSandbox template holding node + Claude Code + envd |
+| `SANDBOX` | `cubesandbox` | `cubesandbox` = one microVM per conversation; `docker` = shared local container; `local` = this host |
+| `HARNESS` | `claude-cli` | coding-agent CLI adapter (`server/harness/`) |
+| `GATEWAY` | `connectra` | model gateway provider (`server/gateway/`) |
+| `VM_TEMPLATE` | `claude-code` | CubeSandbox template holding node + the harness CLI + envd |
 | `ONEXO_AUTH_URL` | `http://127.0.0.1:8000` | OneXO Kong, where this server mints gateway tokens |
 | `ONEXO_LLM_URL` | _(required)_ | gateway root (`…/llm`) as seen from inside the VM — the reverse tunnel |
 | `POC_URL_FROM_VM` | _(required)_ | this server as seen from inside the VM — the token helper's endpoint (second reverse tunnel) |
 | `GATEWAY_TOKEN_REFRESH_S` | `600` | how often claude's token helper refreshes (keep below the 900s token TTL) |
-| `ONEXO_LLM_URL_LOCAL` | `http://host.docker.internal:8000/llm` | gateway root for the docker/local backend |
+| `ONEXO_LLM_URL_CONTAINER` / `ONEXO_LLM_URL_HOST` | `http://host.docker.internal:8000/llm` / `http://127.0.0.1:8000/llm` | gateway root for `SANDBOX=docker` / `local` |
 | `SANDBOX_HARNESS_CLIENT_ID` / `_SECRET` | _(required)_ | OneXO client (`ai:i ai:dg`) used to mint tokens |
 | `ONEXO_ACT_USER_ID` / `ONEXO_ACT_TENANT_ID` | _(required)_ | OneXO user/tenant the POC user's spend is metered to (`ONEXO_IDENTITY_MAP` for per-user) |
 | `GATEWAY_MODEL` / `GATEWAY_SMALL_MODEL` | _(unset)_ | optional model overrides; unset = the gateway decides |
@@ -133,7 +146,7 @@ Every tool call (Bash, Write/Edit, MCP calls, sub-agent `Task`/`Agent` launches,
 Badge details are **not** lost when the sandbox dies. Tool inputs and results are reconstructed from the persisted main transcript (`~/.claude/projects/vm-claude/<session>.jsonl`, already synced per turn) — `reconstructTranscript` now emits `{name, id, input, result, isError, agentId}` per tool, matched by `tool_use_id`, and the history endpoint returns them so reopened conversations show full badge detail. Sub-agent transcripts (which live in the VM's `/tmp`) are synced out too: the backend records each agent's `output_file` path (from its tool result), and `persistAgentOutputs` / the live watcher copy the JSONL to `~/.claude/projects/vm-claude/agents/<session>/<agentId>.output`; `GET /api/agents/:session/:agentId` serves it. On expand, a badge streams live from the VM when it's up (`agent_watch`), and otherwise fetches the persisted copy.
 
 ### Sub-agent activity (live)
-Background agents launched by the `Agent` tool run in the VM and write their full JSONL transcript to `…/tasks/<agentId>.output` — they do **not** appear in the main stream. Expanding a sub-agent badge streams that transcript live: the backend polls the file (`readAgentOutput` in `vmclaude.ts`, `startAgentWatch` in `index.ts`), parses it (skipping only meta/attachment noise — sub-agent entries are all `isSidechain:true`, which is expected), and pushes a compact `agent_update` (the agent's text + its own tool calls with results). The panel shows the agent's steps as they happen and marks it done when the file stops growing; collapsing the badge stops the poll. Verified end-to-end (a launched agent's `Bash` call + final finding streamed to the UI).
+Background agents launched by the `Agent` tool run in the VM and write their full JSONL transcript to `…/tasks/<agentId>.output` — they do **not** appear in the main stream. Expanding a sub-agent badge streams that transcript live: the backend polls the file (`readHomeFile` in `sandbox/cubesandbox.ts`, `startAgentWatch` in `index.ts`), parses it (skipping only meta/attachment noise — sub-agent entries are all `isSidechain:true`, which is expected), and pushes a compact `agent_update` (the agent's text + its own tool calls with results). The panel shows the agent's steps as they happen and marks it done when the file stops growing; collapsing the badge stops the poll. Verified end-to-end (a launched agent's `Bash` call + final finding streamed to the UI).
 
 ## Interactive questions (ask_user)
 
@@ -152,9 +165,9 @@ Try it: *"create a hello-world file but ask me which language first"*.
 
 ## Per-conversation microVMs (the default backend)
 
-With `CLAUDE_BACKEND=cubesandbox`, claude itself runs inside a hardware-isolated KVM microVM on the AWS box (`server/vmclaude.ts`), not in the local container:
+With `SANDBOX=cubesandbox`, the harness itself runs inside a hardware-isolated KVM microVM on the AWS box (`server/sandbox/cubesandbox.ts`), not in the local container:
 
-- **Lifecycle**: first message → `POST /sandboxes` (template `claude-code`, readiness-probed on envd :49983) → credentials + `~/.claude.json` uploaded → persistent `claude -p --input-format stream-json …` started as user `user`. Conversation switch, tab close, or socket drop kills the VM. Nothing persists between conversations.
+- **Lifecycle**: first message → `POST /sandboxes` (template `claude-code`, readiness-probed on envd :49983) → the harness's setup files (claude: `~/.claude.json`) uploaded, no credentials → persistent `claude -p --input-format stream-json …` started as user `user`. Conversation switch, tab close, or socket drop kills the VM. Nothing persists between conversations.
 - **Stdio transport**: envd's `process.Process/Start` connect-RPC stream (stdout out) + `SendInput` (stdin in), through the tunnel with the same Host-header trick as `run_code`. A tiny heartbeat wrapper prints to stderr every 25 s so nginx/tunnel idle timeouts never cut the stream while you think.
 - **Transcripts**: synced out of the VM after every turn into `~/.claude/projects/vm-claude/<session>.jsonl` — the sidebar and resume work exactly as before; resuming uploads the transcript into the fresh VM and passes `--resume`.
 - **Isolation**: claude gets `bypassPermissions` and full tools (Bash, file edits, network) because the blast radius is one throwaway VM with its own kernel. The MCP `run_code` tool is intentionally not wired into VM sessions — claude's own Bash already runs sandboxed.
@@ -162,13 +175,13 @@ With `CLAUDE_BACKEND=cubesandbox`, claude itself runs inside a hardware-isolated
 - **Draft while running**: the composer stays editable while Claude is working — you can type your next message; only **Send** is disabled for a busy conversation (a conversation runs one turn at a time), and pressing Enter keeps your draft rather than clearing it.
 - **Survives reload / tab close**: closing or reloading the browser does **not** stop the run (the VM is server-owned in the cloud). The last-open conversation is remembered (`localStorage`) and reopened on reload, re-attaching to the in-flight turn. A conversation is written to the sidebar the moment its session id is minted (not only when the turn finishes), so a chat started and immediately abandoned still appears and isn't lost.
 - **Concurrent conversations**: because each conversation has its own VM, you can switch conversations mid-generation and run several at once (bounded by VM capacity). The sidebar shows a pulsing amber dot for a conversation that's generating and a green dot for an idle-but-live VM. Sending a message to a conversation that's already busy is rejected with a clear error rather than queued.
-- **See what Claude changes on the VM** (view-only): the header **Files** button opens a live file panel for the current conversation — a browsable tree, a "Changed" list that fills in as Claude edits, and a per-file **before/after diff**. It's served entirely through the backend: `server/vmclaude.ts` calls envd's Filesystem API (`ListDir`, `/files` read, streaming `WatchDir`) over the tunnel, and `server/index.ts` fans change events to the conversation's viewers (`fs_tree` / `fs_open` / pushed `fs_change`). All reads are scoped to `/home/user/projects` and to the caller's own conversation — users never get direct network access to a VM, which is what makes it safe to scale to a multi-tenant, many-user setup. This is deliberately view-only; for a full editable IDE against a VM, run code-server in the template and expose its port via CubeProxy (documented in [docs/aws-cubesandbox.md](docs/aws-cubesandbox.md)) — not wired up here.
+- **See what Claude changes on the VM** (view-only): the header **Files** button opens a live file panel for the current conversation — a browsable tree, a "Changed" list that fills in as Claude edits, and a per-file **before/after diff**. It's served entirely through the backend: `server/sandbox/cubesandbox.ts` calls envd's Filesystem API (`ListDir`, `/files` read, streaming `WatchDir`) over the tunnel, and `server/index.ts` fans change events to the conversation's viewers (`fs_tree` / `fs_open` / pushed `fs_change`). All reads are scoped to `/home/user/projects` and to the caller's own conversation — users never get direct network access to a VM, which is what makes it safe to scale to a multi-tenant, many-user setup. This is deliberately view-only; for a full editable IDE against a VM, run code-server in the template and expose its port via CubeProxy (documented in [docs/aws-cubesandbox.md](docs/aws-cubesandbox.md)) — not wired up here.
 - **The template** (`claude-code`): node:22-slim + `@anthropic-ai/claude-code` + git/ripgrep/python3, with `/usr/bin/envd` copied from the stock `sandbox-code` image and started as the VM's CMD. Crucial discovery: the platform does **not** inject envd — the image must ship and start it itself, and the image must stay `USER root` (envd drops to `user` per request via Basic auth). Rebuild instructions in [docs/aws-cubesandbox.md](docs/aws-cubesandbox.md).
 - **Capacity**: ~3–4 concurrent conversations (each VM reserves 2 vCPU / 3 GB of the t3.xlarge). Creation retries on `no more resource`; a clear error reaches the chat if the tunnel is down.
 
 ## Code execution sandbox (run_code via CubeSandbox)
 
-In **docker-backend** sessions (`CLAUDE_BACKEND=docker`), claude has an MCP tool **`run_code`** for executing code in hardware-isolated KVM microVMs, backed by the same self-hosted [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) (see [docs/aws-cubesandbox.md](docs/aws-cubesandbox.md) for the instance runbook). VM-backend sessions don't need it — their Bash is already sandboxed.
+In **docker/local** sessions (`SANDBOX=docker` or `local`), claude has an MCP tool **`run_code`** for executing code in hardware-isolated KVM microVMs, backed by the same self-hosted [CubeSandbox](https://github.com/TencentCloud/CubeSandbox) (see [docs/aws-cubesandbox.md](docs/aws-cubesandbox.md) for the instance runbook). VM-backend sessions don't need it — their Bash is already sandboxed.
 
 ## MCP servers (configured from the chat)
 
@@ -206,6 +219,6 @@ The backend logs every lifecycle (`spawn pid=… new session/resume=… prompt=�
 
 ## Notes
 
-- Claude runs with `--permission-mode bypassPermissions` — sandboxed by the container, which can only touch the two mounts. In local mode (`CLAUDE_CONTAINER=`) that applies to your machine, so point `PROJECTS_DIR` somewhere disposable if unsure.
+- Claude runs with `--permission-mode bypassPermissions` — sandboxed by the container, which can only touch the two mounts. With `SANDBOX=local` that applies to your machine, so point `PROJECTS_DIR` somewhere disposable if unsure.
 - **docker backend**: one persistent claude process per WebSocket; one turn at a time — concurrent sends get an `error` reply. Switching conversations replaces the process (respawned with `--resume`). Closing the tab kills the process. (The VM backend behaves differently — see the microVM section: conversations are server-owned, survive the tab, and run concurrently.)
 - Container code changes need `docker compose up -d --build`; backend/frontend changes just need a process restart.

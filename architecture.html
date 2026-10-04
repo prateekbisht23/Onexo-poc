@@ -253,7 +253,7 @@
       <rect x="60" y="196" width="360" height="86" rx="8" class="box"/>
       <text x="76" y="222" class="t">Bun backend</text>
       <text x="76" y="241" class="m">:8091 · WebSocket + web build + SQLite sidebar</text>
-      <text x="76" y="257" class="m">vmclaude.ts · VM session client (per conversation)</text>
+      <text x="76" y="257" class="m">sandbox/cubesandbox.ts · VM session (per conversation)</text>
       <text x="76" y="273" class="m">idle timeout · LRU eviction · getIdentity() seam</text>
 
       <line x1="160" y1="124" x2="160" y2="194" class="flow" marker-end="url(#ar)"/>
@@ -322,7 +322,7 @@
 <section>
   <p class="sec-label">02 · the chat plumbing</p>
   <h2>How a message flows</h2>
-  <p>The default backend is <code>CLAUDE_BACKEND=cubesandbox</code> — one VM per conversation:</p>
+  <p>The default backend is <code>SANDBOX=cubesandbox</code> — one VM per conversation:</p>
   <ol>
     <li>The browser keeps one <strong>WebSocket</strong> open to the Bun backend and sends <code>{"type":"chat","text":"…"}</code>.</li>
     <li>On the first message of a conversation the backend <strong>creates the session's S3 volume</strong> (<code>POST /volumes {name, driver:"s3"}</code>) and boots a <code>claude-code</code>-template microVM with it mounted at <code>/home/user/projects</code> (<code>volumeMounts</code> on <code>POST /sandboxes</code>). One root-level <code>chown user:user</code> makes the mount writable — that fix persists on the volume.</li>
@@ -330,7 +330,7 @@
     <li>Claude's output streams back as JSON events (token by token), which the backend relays to the browser unchanged. After every turn the backend <strong>syncs the transcript</strong> (<code>&lt;session-id&gt;.jsonl</code>) out of the VM.</li>
     <li>The sidebar's SQLite db stores ids, titles, the volume name, and the tenant (<code>org</code>/<code>user</code>) — never the messages.</li>
   </ol>
-  <p>Credentials stay ephemeral: <code>~/.claude/.credentials.json</code> is injected at each launch and never written to the volume. The legacy <strong>docker mode</strong> (<code>CLAUDE_BACKEND=docker</code>) still exists — Claude in the local <code>claude-poc</code> container, with a <code>run_code</code> MCP tool that executes code in one-shot microVMs; the VM mode doesn't need that tool, since Claude's whole shell is already inside a VM.</p>
+  <p>No model credentials ever enter the VM: claude calls the OneXO AI gateway (Kong <code>/llm/anthropic</code> → Connectra) through a reverse tunnel, with short-lived tokens its <code>apiKeyHelper</code> fetches from the backend (<code>server/gateway/</code>). The legacy <strong>docker mode</strong> (<code>SANDBOX=docker</code>) still exists — Claude in the local <code>claude-poc</code> container, with a <code>run_code</code> MCP tool that executes code in one-shot microVMs; the VM mode doesn't need that tool, since Claude's whole shell is already inside a VM.</p>
 </section>
 
 <section>
@@ -518,10 +518,10 @@
       <line x1="40" y1="144" x2="880" y2="144" class="life"/>
 
       <!-- working row -->
-      <text x="40" y="176" class="zl">WHAT vmclaude.ts ACTUALLY DOES</text>
+      <text x="40" y="176" class="zl">WHAT sandbox/cubesandbox.ts ACTUALLY DOES</text>
       <rect x="40" y="194" width="150" height="56" rx="8" class="box"/>
       <text x="115" y="218" text-anchor="middle" class="t">Mac</text>
-      <text x="115" y="236" text-anchor="middle" class="m">Bun · vmclaude.ts</text>
+      <text x="115" y="236" text-anchor="middle" class="m">Bun · cubesandbox.ts</text>
 
       <line x1="190" y1="222" x2="356" y2="222" class="aflow" marker-end="url(#ara4)"/>
       <text x="273" y="204" text-anchor="middle" class="ma">POST localhost:3080/…</text>
@@ -557,8 +557,8 @@
     <thead><tr><th>Address</th><th>What it is</th><th>Runs on</th></tr></thead>
     <tbody>
       <tr><td>:5173</td><td>Vite dev server (React chat UI); proxies <code>/ws</code> to 8091</td><td>Mac</td></tr>
-      <tr><td>:8091</td><td>Bun backend — WebSocket, sidebar REST, VM session client (<code>vmclaude.ts</code>), serves the built UI, <code>/mcp</code> for docker mode</td><td>Mac</td></tr>
-      <tr><td>claude-poc</td><td>Docker container for the legacy docker backend (<code>CLAUDE_BACKEND=docker</code>); unused in VM mode</td><td>Mac</td></tr>
+      <tr><td>:8091</td><td>Bun backend — WebSocket, sidebar REST, VM session client (<code>sandbox/cubesandbox.ts</code>), serves the built UI, <code>/mcp</code> for docker mode</td><td>Mac</td></tr>
+      <tr><td>claude-poc</td><td>Docker container for the legacy docker backend (<code>SANDBOX=docker</code>); unused in VM mode</td><td>Mac</td></tr>
       <tr><td>:3000 → :3000</td><td>Cube API — E2B-v1-compatible REST: sandboxes <em>and</em> S3 volumes (create, list, delete)</td><td>EC2, via tunnel</td></tr>
       <tr><td>:3080 → :80</td><td>nginx (CubeProxy) — routes to each VM's envd (<code>:49983</code>) by Host header: claude stdio, files, watch</td><td>EC2, via tunnel</td></tr>
       <tr><td>:12088 → :12088</td><td>CubeSandbox WebUI console</td><td>EC2, via tunnel</td></tr>
