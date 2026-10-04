@@ -3,9 +3,11 @@ import { readdir } from "fs/promises";
 import { join, normalize } from "path";
 import { deleteConversation, getConversation, listConversations, migrate, renameSession, touchConversation } from "./db";
 import { runCode, sandboxConfigSummary } from "./sandbox";
-import { destroyVolume, VmClaudeSession, VM_MCP_CONFIG_PATH } from "./vmclaude";
+import { destroyVolume, VmHarnessSession, VM_CWD, VM_HOME, VM_MCP_CONFIG_PATH } from "./sandbox/cubesandbox";
+import { dockerSandbox, hostSandbox, type LocalSandbox } from "./sandbox/local";
+import { GATEWAY_TOKEN_PATH, handleGatewayTokenRequest, openBrokeredSession, selectGateway, type BrokeredSession } from "./gateway";
+import { selectHarness } from "./harness";
 import { addMcpServer, deleteMcpServer, listMcpServers, setMcpEnabled, updateMcpOAuth, upsertOAuthServer, type McpServer } from "./db";
-import { claudeGatewayArgs, claudeGatewayEnv, gatewayConfigSummary, GATEWAY_TOKEN_PATH, handleGatewayTokenRequest, openGatewaySession, type GatewaySession } from "./gateway";
 import * as mcpOAuth from "./mcp-oauth";
 import { mkdirSync, writeFileSync } from "fs";
 
@@ -30,33 +32,17 @@ migrate();
 
 // 8091 because 127.0.0.1:8080 is held by another container on this machine.
 const PORT = Number(process.env.PORT ?? 8091);
-const PROJECTS_DIR = process.env.PROJECTS_DIR ?? join(process.env.HOME ?? "/", "projects");
-const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
-// Claude runs INSIDE this docker container via `docker exec` (the default flow).
-// Set CLAUDE_CONTAINER= (empty) to run claude locally on this machine instead.
-const CLAUDE_CONTAINER = process.env.CLAUDE_CONTAINER ?? "claude-poc";
-const CONTAINER_WORKDIR = process.env.CONTAINER_WORKDIR ?? "/home/onexo/projects";
-// "cubesandbox": every conversation gets its own KVM microVM on the AWS box
-// (claude launches inside it; killed when the conversation ends).
-// "docker": the original shared-container flow.
-const CLAUDE_BACKEND = process.env.CLAUDE_BACKEND ?? "cubesandbox";
-const PUBLIC_DIR = join(import.meta.dir, "public");
-
-// Gateway root as seen by a docker/local claude (the VM path uses ONEXO_LLM_URL — the tunnel).
-const LOCAL_HOST = CLAUDE_CONTAINER ? "host.docker.internal" : "127.0.0.1";
-const ONEXO_LLM_URL_LOCAL = process.env.ONEXO_LLM_URL_LOCAL ?? `http://${LOCAL_HOST}:8000/llm`;
-// This server as seen by a docker/local claude's token helper.
-const POC_URL_LOCAL = `http://${LOCAL_HOST}:${process.env.PORT ?? 8091}`;
-
-function buildClaudeCommand(args: string[], envKeys: string[] = []): string[] {
-  if (CLAUDE_CONTAINER) {
-    // -i keeps stdin open: the persistent claude process reads user messages from it.
-    // `-e KEY` (no value) forwards from the spawn env, so the token never lands in argv.
-    const envFlags = envKeys.flatMap((k) => ["-e", k]);
-    return ["docker", "exec", "-i", ...envFlags, "-w", CONTAINER_WORKDIR, CLAUDE_CONTAINER, CLAUDE_BIN, ...args];
-  }
-  return [CLAUDE_BIN, ...args];
+// The three plugs (README "Plugs"): which sandbox runs which harness against which gateway.
+// cubesandbox = one microVM per conversation; docker = shared local container; local = this host.
+const SANDBOX = process.env.SANDBOX ?? "cubesandbox";
+const LOCAL_SANDBOXES: Record<string, LocalSandbox> = { docker: dockerSandbox, local: hostSandbox };
+if (SANDBOX !== "cubesandbox" && !LOCAL_SANDBOXES[SANDBOX]) {
+  throw new Error(`unknown SANDBOX "${SANDBOX}" (known: cubesandbox, docker, local)`);
 }
+const localSandbox = LOCAL_SANDBOXES[SANDBOX] ?? dockerSandbox;
+const harness = selectHarness();
+const gateway = selectGateway();
+const PUBLIC_DIR = join(import.meta.dir, "public");
 
 function log(...parts: unknown[]) {
   console.log(`[${new Date().toISOString()}]`, ...parts);
@@ -75,11 +61,11 @@ const ASK_USER_PROMPT = [
   "The user's next message will contain their selection(s), a custom answer, or a note that they skipped the question.",
 ].join("\n");
 
-// ---- MCP: exposes run_code (CubeSandbox microVM execution) to claude ----
+// ---- MCP: exposes run_code (CubeSandbox microVM execution) to the harness ----
 // Served by this process at /mcp (streamable-HTTP, JSON responses only — no
-// SSE needed since the server never pushes). Claude runs inside the docker
-// container, so it reaches us via host.docker.internal.
-const MCP_URL = CLAUDE_CONTAINER
+// SSE needed since the server never pushes). A docker/local harness only; a VM
+// harness already IS the sandbox.
+const MCP_URL = localSandbox.vantage === "container"
   ? `http://host.docker.internal:${PORT}/mcp`
   : `http://localhost:${PORT}/mcp`;
 const MCP_CONFIG = JSON.stringify({
@@ -171,7 +157,7 @@ type SocketData = {
   // vm backend: which conversation this socket is currently viewing
   watching: string | null;
   identity: Identity; // who this connection is (from the identity seam)
-  gateway: GatewaySession | null; // docker backend: the live claude's token-helper session
+  gateway: BrokeredSession | null; // docker/local: the live harness's token-helper session
 };
 
 type ClientMessage =
@@ -216,41 +202,15 @@ async function streamLines(
   if (rest) onLine(rest);
 }
 
-function buildClaudeArgs(resumeSessionId: string | null, withMcp: boolean): string[] {
-  const args = [
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    "--permission-mode",
-    "bypassPermissions",
-    "--append-system-prompt",
-    ASK_USER_PROMPT,
-  ];
-  // MCP run_code only makes sense for the docker backend: a VM-backed claude
-  // already IS the sandbox (its own Bash runs isolated), and the VM couldn't
-  // reach this server anyway.
-  if (withMcp) args.push("--mcp-config", MCP_CONFIG);
-  if (resumeSessionId) args.push("--resume", resumeSessionId);
-  return args;
-}
-
 // Shared stdout handler: session tracking, event relay, end-of-turn signal.
-function makeClaudeLineHandler(
+function makeHarnessLineHandler(
   ws: ServerWebSocket<SocketData>,
   label: () => string,
   onResult?: () => void,
 ) {
   return (line: string) => {
-    let event: any;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      return; // ignore non-JSON noise
-    }
+    const event = harness.decodeLine(line);
+    if (!event) return;
     // Resuming can mint a NEW session id; always track and forward the latest.
     if (event.session_id && event.session_id !== ws.data.lastSessionId) {
       const previous = ws.data.lastSessionId;
@@ -287,7 +247,7 @@ const VM_IDLE_TTL_MS = Number(process.env.VM_IDLE_TTL_S ?? 300) * 1000;
 type Conv = {
   id: string; // claude session id, or "pending:<tempId>" until minted
   tempId: string | null;
-  vm: VmClaudeSession;
+  vm: VmHarnessSession;
   busy: boolean;
   lastPrompt: string;
   lastActivity: number; // for LRU eviction
@@ -300,7 +260,7 @@ type Conv = {
   stopWatch: (() => void) | null; // one envd file-watcher per conv (lazy)
   changed: Set<string>; // paths changed this VM lifetime (for late viewers)
   agentOutputs: Map<string, string>; // agentId → transcript path in the VM (to persist)
-  gateway: GatewaySession | null; // closed in finalizeConv — revokes the VM's token helper key
+  gateway: BrokeredSession | null; // closed in finalizeConv — revokes the VM's token helper key
 };
 
 const convs = new Map<string, Conv>();
@@ -339,12 +299,8 @@ function scheduleIdleKill(conv: Conv) {
 }
 
 function handleConvLine(conv: Conv, line: string) {
-  let event: any;
-  try {
-    event = JSON.parse(line);
-  } catch {
-    return;
-  }
+  const event = harness.decodeLine(line);
+  if (!event) return;
   if (event.session_id && event.session_id !== conv.id) {
     const prev = conv.id;
     convs.delete(prev);
@@ -425,7 +381,7 @@ function createConv(
   const conv: Conv = {
     id: key,
     tempId,
-    vm: null as unknown as VmClaudeSession,
+    vm: null as unknown as VmHarnessSession,
     busy: false,
     lastPrompt: "",
     lastActivity: Date.now(),
@@ -440,17 +396,25 @@ function createConv(
     agentOutputs: new Map(),
     gateway: null,
   };
-  const claudeArgs = buildClaudeArgs(resumeSessionId, false);
-  if (mcpConfigJson) claudeArgs.push("--mcp-config", VM_MCP_CONFIG_PATH);
-  conv.vm = new VmClaudeSession({
-    claudeArgs,
+  conv.vm = new VmHarnessSession({
     resumeSessionId,
     volumeName,
-    mcpConfigJson,
-    harnessLaunch: async () => {
-      conv.gateway = await openGatewaySession(identity.user);
-      return { env: claudeGatewayEnv(conv.gateway), args: claudeGatewayArgs() };
+    launch: async () => {
+      conv.gateway = await openBrokeredSession(gateway, harness.protocol, identity.user, "vm");
+      const g = harness.gatewayConfig(conv.gateway.conn);
+      const args = harness.args({
+        resumeSessionId,
+        systemPrompt: ASK_USER_PROMPT,
+        mcpConfig: mcpConfigJson ? VM_MCP_CONFIG_PATH : undefined,
+      });
+      return {
+        bin: harness.bin,
+        args: [...args, ...g.args],
+        env: g.env,
+        files: { ...harness.setupFiles(VM_HOME), ...(mcpConfigJson ? { [VM_MCP_CONFIG_PATH]: mcpConfigJson } : {}) },
+      };
     },
+    transcriptPath: (sessionId) => harness.transcriptPath(VM_HOME, VM_CWD, sessionId),
     onLine: (line) => handleConvLine(conv, line),
     onExit: ({ code, stderrTail }) => {
       log(`conv ${conv.id} ended code=${code}`);
@@ -528,12 +492,7 @@ async function sendToVmConv(ws: ServerWebSocket<SocketData>, msg: Extract<Client
   if (conv.idleTimer) clearTimeout(conv.idleTimer);
   conv.vm.refreshTimeout();
   log(`turn start (conv=${conv.id} vm=${conv.vm.sandboxId ?? "booting"}) prompt=${JSON.stringify(msg.text.length > 60 ? msg.text.slice(0, 60) + "…" : msg.text)}`);
-  conv.vm.writeLine(
-    JSON.stringify({
-      type: "user",
-      message: { role: "user", content: [{ type: "text", text: msg.text }] },
-    }) + "\n",
-  );
+  conv.vm.writeLine(harness.encodeUserMessage(msg.text));
   broadcastLive();
 }
 
@@ -638,6 +597,9 @@ function parseAgentTranscript(jsonl: string): AgentItem[] {
   return items;
 }
 
+// Claude's background sub-agents write here; the browser may only ask for these files.
+const AGENT_OUTPUT_PATH = /\/tasks\/[A-Za-z0-9_-]+\.output$/;
+
 // key = `${sessionId}\u0000${toolUseId}` → poll timer
 const agentWatchers = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -652,7 +614,7 @@ function startAgentWatch(ws: ServerWebSocket<SocketData>, sessionId: string, too
     const c = convs.get(sessionId);
     if (!c) return stopAgentWatch(sessionId, toolUseId);
     let text: string | null = null;
-    try { text = await c.vm.readAgentOutput(path); } catch (e) { log(`agent watch read failed: ${e}`); return stopAgentWatch(sessionId, toolUseId); }
+    try { text = AGENT_OUTPUT_PATH.test(path) ? await c.vm.readHomeFile(path) : null; } catch (e) { log(`agent watch read failed: ${e}`); return stopAgentWatch(sessionId, toolUseId); }
     if (text == null) return; // not created yet
     const agentId = path.match(/\/tasks\/([A-Za-z0-9_-]+)\.output$/)?.[1];
     if (text.length === lastLen) {
@@ -687,7 +649,7 @@ async function persistAgentOutputs(conv: Conv) {
   const sid = convPublicId(conv);
   if (!sid) return;
   for (const [agentId, path] of conv.agentOutputs) {
-    try { const t = await conv.vm.readAgentOutput(path); if (t) saveAgentOutput(sid, agentId, t); } catch {}
+    try { const t = await conv.vm.readHomeFile(path); if (t) saveAgentOutput(sid, agentId, t); } catch {}
   }
 }
 
@@ -738,31 +700,29 @@ function ensureWatch(conv: Conv) {
   });
 }
 
-// One PERSISTENT claude process per WebSocket connection: user messages go in
-// over stdin as stream-json, responses stream out over stdout. No per-message
-// spawn, no --resume between turns of the same connection — the process itself
-// holds the conversation. --resume is only used to reopen an old conversation.
-async function spawnPersistentClaude(ws: ServerWebSocket<SocketData>, resumeSessionId: string | null) {
-  const args = buildClaudeArgs(resumeSessionId, true);
+// One PERSISTENT harness process per WebSocket connection: user messages go in
+// over stdin, responses stream out over stdout. No per-message spawn, no resume
+// between turns of the same connection — the process itself holds the
+// conversation. Resume is only used to reopen an old conversation.
+async function spawnLocalHarness(ws: ServerWebSocket<SocketData>, resumeSessionId: string | null) {
   ws.data.gateway?.close();
-  const gateway = await openGatewaySession(ws.data.identity.user, { llmBaseUrl: ONEXO_LLM_URL_LOCAL, pocUrl: POC_URL_LOCAL });
-  ws.data.gateway = gateway;
-  args.push(...claudeGatewayArgs());
-  const gatewayEnv = claudeGatewayEnv(gateway);
+  ws.data.gateway = await openBrokeredSession(gateway, harness.protocol, ws.data.identity.user, localSandbox.vantage);
+  const g = harness.gatewayConfig(ws.data.gateway.conn);
+  const args = [...harness.args({ resumeSessionId, systemPrompt: ASK_USER_PROMPT, mcpConfig: MCP_CONFIG }), ...g.args];
 
   const startedAt = Date.now();
-  const proc = Bun.spawn(buildClaudeCommand(args, Object.keys(gatewayEnv)), {
-    cwd: CLAUDE_CONTAINER ? undefined : PROJECTS_DIR,
+  const proc = Bun.spawn(localSandbox.command(harness.bin, args, Object.keys(g.env)), {
+    cwd: localSandbox.cwd,
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...gatewayEnv },
+    env: { ...process.env, ...g.env },
   });
   ws.data.proc = proc;
   ws.data.procSessionId = resumeSessionId;
   ws.data.lastSessionId = resumeSessionId;
   log(
-    `spawn persistent pid=${proc.pid}${CLAUDE_CONTAINER ? ` (docker exec → ${CLAUDE_CONTAINER})` : " (local)"}` +
+    `spawn persistent ${harness.name} pid=${proc.pid} (${localSandbox.name})` +
       (resumeSessionId ? ` resume=${resumeSessionId}` : " new session"),
   );
 
@@ -771,7 +731,7 @@ async function spawnPersistentClaude(ws: ServerWebSocket<SocketData>, resumeSess
     stderrTail = (stderrTail + line + "\n").slice(-4000);
   });
 
-  streamLines(proc.stdout, makeClaudeLineHandler(ws, () => `pid=${proc.pid}`))
+  streamLines(proc.stdout, makeHarnessLineHandler(ws, () => `pid=${proc.pid}`))
     .then(async () => {
       await stderrDone;
       const code = await proc.exited;
@@ -792,8 +752,8 @@ async function spawnPersistentClaude(ws: ServerWebSocket<SocketData>, resumeSess
     });
 }
 
-// Docker backend only: the legacy per-socket persistent process.
-async function sendToClaude(ws: ServerWebSocket<SocketData>, text: string, sessionId?: string) {
+// docker/local sandboxes: the per-socket persistent process.
+async function sendToLocalHarness(ws: ServerWebSocket<SocketData>, text: string, sessionId?: string) {
   const desired = sessionId ?? null;
   // Conversation switched (new chat, or an old one opened from the sidebar):
   // the running process belongs to another session, so replace it.
@@ -805,22 +765,17 @@ async function sendToClaude(ws: ServerWebSocket<SocketData>, text: string, sessi
   ws.data.busy = true; // set before the async token mint so a second message can't race in
   if (!ws.data.proc) {
     try {
-      await spawnPersistentClaude(ws, desired);
+      await spawnLocalHarness(ws, desired);
     } catch (err) {
       ws.data.busy = false;
-      sendJson(ws, { type: "error", error: `could not start claude: ${err instanceof Error ? err.message : err}` });
+      sendJson(ws, { type: "error", error: `could not start ${harness.name}: ${err instanceof Error ? err.message : err}` });
       return;
     }
   }
 
   ws.data.lastPrompt = text;
   log(`turn start (pid=${ws.data.proc!.pid}) prompt=${JSON.stringify(text.length > 60 ? text.slice(0, 60) + "…" : text)}`);
-  ws.data.proc!.stdin.write(
-    JSON.stringify({
-      type: "user",
-      message: { role: "user", content: [{ type: "text", text }] },
-    }) + "\n",
-  );
+  ws.data.proc!.stdin.write(harness.encodeUserMessage(text) + "\n");
   ws.data.proc!.stdin.flush();
 }
 
@@ -951,7 +906,7 @@ const server = Bun.serve<SocketData>({
       return handleGatewayTokenRequest(req);
     }
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, projectsDir: PROJECTS_DIR });
+      return Response.json({ ok: true, sandbox: SANDBOX, harness: harness.name, gateway: gateway.name });
     }
     if (url.pathname === "/mcp") {
       return serveMcp(req);
@@ -984,7 +939,7 @@ const server = Bun.serve<SocketData>({
     open(ws) {
       allSockets.add(ws);
       sendJson(ws, { type: "ready" });
-      if (CLAUDE_BACKEND === "cubesandbox") sendJson(ws, liveSnapshot());
+      if (SANDBOX === "cubesandbox") sendJson(ws, liveSnapshot());
     },
     message(ws, raw) {
       let msg: ClientMessage;
@@ -994,7 +949,7 @@ const server = Bun.serve<SocketData>({
         sendJson(ws, { type: "error", error: "Invalid JSON" });
         return;
       }
-      if (CLAUDE_BACKEND === "cubesandbox") {
+      if (SANDBOX === "cubesandbox") {
         if (msg.type === "watch") {
           watchConv(ws, msg.sessionId ?? null);
           return;
@@ -1059,7 +1014,7 @@ const server = Bun.serve<SocketData>({
         sendJson(ws, { type: "error", error: "Expected {type:'chat', text, sessionId?} or {type:'watch', sessionId?}" });
         return;
       }
-      if (CLAUDE_BACKEND === "cubesandbox") {
+      if (SANDBOX === "cubesandbox") {
         void sendToVmConv(ws, msg);
         return;
       }
@@ -1067,7 +1022,7 @@ const server = Bun.serve<SocketData>({
         sendJson(ws, { type: "error", error: "A message is already being processed" });
         return;
       }
-      void sendToClaude(ws, msg.text, msg.sessionId);
+      void sendToLocalHarness(ws, msg.text, msg.sessionId);
     },
     close(ws) {
       allSockets.delete(ws);
@@ -1092,13 +1047,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 
 console.log(`claude-poc server listening on http://localhost:${server.port}`);
-console.log(`  backend: ${CLAUDE_BACKEND}${CLAUDE_BACKEND === "cubesandbox" ? " — one microVM per conversation (CLAUDE_BACKEND=docker for the old flow)" : ""}`);
-console.log(`  AI gateway:   ${gatewayConfigSummary()}`);
+console.log(`  plugs:        SANDBOX=${SANDBOX} HARNESS=${harness.name} GATEWAY=${gateway.name}`);
+console.log(`  gateway:      ${gateway.describe()}`);
+console.log(`  harness runs: ${SANDBOX === "cubesandbox"
+  ? `inside a fresh CubeSandbox microVM per conversation (template "${process.env.VM_TEMPLATE ?? "claude-code"}")`
+  : localSandbox.describe()}`);
 console.log(`  sandbox tool: run_code via MCP at ${MCP_URL} (${sandboxConfigSummary()})`);
-if (CLAUDE_BACKEND !== "docker") {
-  console.log(`  claude runs:  inside a fresh CubeSandbox microVM per conversation (template "${process.env.CLAUDE_VM_TEMPLATE ?? "claude-code"}")`);
-} else if (CLAUDE_CONTAINER) {
-  console.log(`  claude runs:  inside docker container "${CLAUDE_CONTAINER}" (cwd ${CONTAINER_WORKDIR})`);
-} else {
-  console.log(`  claude runs:  locally (${CLAUDE_BIN}), cwd ${PROJECTS_DIR}`);
-}
