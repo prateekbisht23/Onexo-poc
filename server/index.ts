@@ -5,9 +5,9 @@ import { deleteConversation, getConversation, listConversations, migrate, rename
 import { runCode, sandboxConfigSummary } from "./sandbox";
 import { destroyVolume, VmClaudeSession, VM_MCP_CONFIG_PATH } from "./vmclaude";
 import { addMcpServer, deleteMcpServer, listMcpServers, setMcpEnabled, updateMcpOAuth, upsertOAuthServer, type McpServer } from "./db";
-import { buildAuthorize, exchange } from "./oauth";
+import { claudeGatewayEnv, gatewayConfigSummary, gatewaySession } from "./gateway";
 import * as mcpOAuth from "./mcp-oauth";
-import { chmodSync, mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, writeFileSync } from "fs";
 
 // Identity seam — the ONE place that decides who the caller is. PoC: a stub
 // (fixed org/user, overridable by header/env). Production: validate the JWT/SSO
@@ -42,10 +42,16 @@ const CONTAINER_WORKDIR = process.env.CONTAINER_WORKDIR ?? "/home/onexo/projects
 const CLAUDE_BACKEND = process.env.CLAUDE_BACKEND ?? "cubesandbox";
 const PUBLIC_DIR = join(import.meta.dir, "public");
 
-function buildClaudeCommand(args: string[]): string[] {
+// Gateway root as seen by a docker/local claude (the VM path uses ONEXO_LLM_URL — the tunnel).
+const ONEXO_LLM_URL_LOCAL =
+  process.env.ONEXO_LLM_URL_LOCAL ?? `http://${CLAUDE_CONTAINER ? "host.docker.internal" : "127.0.0.1"}:8000/llm`;
+
+function buildClaudeCommand(args: string[], envKeys: string[] = []): string[] {
   if (CLAUDE_CONTAINER) {
-    // -i keeps stdin open: the persistent claude process reads user messages from it
-    return ["docker", "exec", "-i", "-w", CONTAINER_WORKDIR, CLAUDE_CONTAINER, CLAUDE_BIN, ...args];
+    // -i keeps stdin open: the persistent claude process reads user messages from it.
+    // `-e KEY` (no value) forwards from the spawn env, so the token never lands in argv.
+    const envFlags = envKeys.flatMap((k) => ["-e", k]);
+    return ["docker", "exec", "-i", ...envFlags, "-w", CONTAINER_WORKDIR, CLAUDE_CONTAINER, CLAUDE_BIN, ...args];
   }
   return [CLAUDE_BIN, ...args];
 }
@@ -174,7 +180,6 @@ type ClientMessage =
   | { type: "delete_conversation"; sessionId: string } // wipe VM + volume + row
   | { type: "agent_watch"; sessionId: string; toolUseId: string; path: string }
   | { type: "agent_unwatch"; sessionId: string; toolUseId: string }
-  | { type: "login"; code?: string } // dashboard OAuth: no code = start, code = complete
   | { type: "mcp_list" }
   | { type: "mcp_add"; name: string; transport: string; config: Record<string, unknown> }
   | { type: "mcp_connect"; name: string; url: string } // OAuth "Connect" flow
@@ -385,7 +390,6 @@ function handleConvLine(conv: Conv, line: string) {
         { volumeId: conv.volumeName, org: conv.org, user: conv.user },
       );
       void conv.vm.syncTranscript(conv.id);
-      void conv.vm.syncCredentials(); // carry OAuth token rotation forward
     }
     log(`turn done (conv=${conv.id} vm=${conv.vm.sandboxId}) subtype=${event.subtype}`);
     sendToSubs(conv, { type: "done", sessionId: convPublicId(conv), code: 0 });
@@ -438,6 +442,7 @@ function createConv(
     resumeSessionId,
     volumeName,
     mcpConfigJson,
+    harnessEnv: async () => claudeGatewayEnv(await gatewaySession(identity.user)),
     onLine: (line) => handleConvLine(conv, line),
     onExit: ({ code, stderrTail }) => {
       log(`conv ${conv.id} ended code=${code}`);
@@ -522,46 +527,12 @@ async function sendToVmConv(ws: ServerWebSocket<SocketData>, msg: Extract<Client
   broadcastLive();
 }
 
-// Persist transcript + rotated creds out of the VM before it dies. On-result
+// Persist transcript + agent outputs out of the VM before it dies. On-result
 // sync covers the common case; this guards teardowns that race a just-finished
 // turn (immediate end_session, fast idle kill).
 async function flushConv(conv: Conv) {
   if (!convPublicId(conv)) return;
-  await Promise.allSettled([conv.vm.syncTranscript(conv.id), conv.vm.syncCredentials(), persistAgentOutputs(conv)]);
-}
-
-// ---- dashboard OAuth login (/login) ----
-// Per-user PKCE verifier awaiting the pasted code. PoC writes the resulting
-// creds to CLAUDE_DIR/.credentials.json (the file VMs inject); multi-tenant
-// would key these by user in an encrypted table instead.
-const loginVerifiers = new Map<string, { verifier: string; ts: number }>();
-
-async function handleLogin(ws: ServerWebSocket<SocketData>, code?: string) {
-  const user = ws.data.identity.user;
-  if (!code) {
-    const { url, verifier } = buildAuthorize();
-    loginVerifiers.set(user, { verifier, ts: Date.now() });
-    sendJson(ws, { type: "login_url", url });
-    return;
-  }
-  const rec = loginVerifiers.get(user);
-  if (!rec || Date.now() - rec.ts > 10 * 60_000) {
-    sendJson(ws, { type: "login_result", ok: false, error: "Login expired — type /login again to restart." });
-    return;
-  }
-  try {
-    const creds = await exchange(code, rec.verifier);
-    mkdirSync(CLAUDE_DIR, { recursive: true });
-    const path = join(CLAUDE_DIR, ".credentials.json");
-    writeFileSync(path, JSON.stringify(creds));
-    try { chmodSync(path, 0o600); } catch {}
-    loginVerifiers.delete(user);
-    log(`oauth login ok for user=${user}`);
-    sendJson(ws, { type: "login_result", ok: true });
-  } catch (err) {
-    log(`oauth login failed: ${err}`);
-    sendJson(ws, { type: "login_result", ok: false, error: err instanceof Error ? err.message : String(err) });
-  }
+  await Promise.allSettled([conv.vm.syncTranscript(conv.id), persistAgentOutputs(conv)]);
 }
 
 // ---- MCP: config materialization + OAuth "Connect" flow ----
@@ -761,16 +732,17 @@ function ensureWatch(conv: Conv) {
 // over stdin as stream-json, responses stream out over stdout. No per-message
 // spawn, no --resume between turns of the same connection — the process itself
 // holds the conversation. --resume is only used to reopen an old conversation.
-function spawnPersistentClaude(ws: ServerWebSocket<SocketData>, resumeSessionId: string | null) {
+async function spawnPersistentClaude(ws: ServerWebSocket<SocketData>, resumeSessionId: string | null) {
   const args = buildClaudeArgs(resumeSessionId, true);
+  const gatewayEnv = claudeGatewayEnv(await gatewaySession(ws.data.identity.user, ONEXO_LLM_URL_LOCAL));
 
   const startedAt = Date.now();
-  const proc = Bun.spawn(buildClaudeCommand(args), {
+  const proc = Bun.spawn(buildClaudeCommand(args, Object.keys(gatewayEnv)), {
     cwd: CLAUDE_CONTAINER ? undefined : PROJECTS_DIR,
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    env: process.env,
+    env: { ...process.env, ...gatewayEnv },
   });
   ws.data.proc = proc;
   ws.data.procSessionId = resumeSessionId;
@@ -807,7 +779,7 @@ function spawnPersistentClaude(ws: ServerWebSocket<SocketData>, resumeSessionId:
 }
 
 // Docker backend only: the legacy per-socket persistent process.
-function sendToClaude(ws: ServerWebSocket<SocketData>, text: string, sessionId?: string) {
+async function sendToClaude(ws: ServerWebSocket<SocketData>, text: string, sessionId?: string) {
   const desired = sessionId ?? null;
   // Conversation switched (new chat, or an old one opened from the sidebar):
   // the running process belongs to another session, so replace it.
@@ -816,9 +788,17 @@ function sendToClaude(ws: ServerWebSocket<SocketData>, text: string, sessionId?:
     ws.data.proc.kill();
     ws.data.proc = null;
   }
-  if (!ws.data.proc) spawnPersistentClaude(ws, desired);
+  ws.data.busy = true; // set before the async token mint so a second message can't race in
+  if (!ws.data.proc) {
+    try {
+      await spawnPersistentClaude(ws, desired);
+    } catch (err) {
+      ws.data.busy = false;
+      sendJson(ws, { type: "error", error: `could not start claude: ${err instanceof Error ? err.message : err}` });
+      return;
+    }
+  }
 
-  ws.data.busy = true;
   ws.data.lastPrompt = text;
   log(`turn start (pid=${ws.data.proc!.pid}) prompt=${JSON.stringify(text.length > 60 ? text.slice(0, 60) + "…" : text)}`);
   ws.data.proc!.stdin.write(
@@ -1009,10 +989,6 @@ const server = Bun.serve<SocketData>({
           void deleteConversationFully(msg.sessionId);
           return;
         }
-        if (msg.type === "login") {
-          void handleLogin(ws, msg.code);
-          return;
-        }
         if (msg.type === "agent_watch") {
           startAgentWatch(ws, msg.sessionId, msg.toolUseId, msg.path);
           return;
@@ -1073,7 +1049,7 @@ const server = Bun.serve<SocketData>({
         sendJson(ws, { type: "error", error: "A message is already being processed" });
         return;
       }
-      sendToClaude(ws, msg.text, msg.sessionId);
+      void sendToClaude(ws, msg.text, msg.sessionId);
     },
     close(ws) {
       allSockets.delete(ws);
@@ -1097,6 +1073,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 console.log(`claude-poc server listening on http://localhost:${server.port}`);
 console.log(`  backend: ${CLAUDE_BACKEND}${CLAUDE_BACKEND === "cubesandbox" ? " — one microVM per conversation (CLAUDE_BACKEND=docker for the old flow)" : ""}`);
+console.log(`  AI gateway:   ${gatewayConfigSummary()}`);
 console.log(`  sandbox tool: run_code via MCP at ${MCP_URL} (${sandboxConfigSummary()})`);
 if (CLAUDE_BACKEND !== "docker") {
   console.log(`  claude runs:  inside a fresh CubeSandbox microVM per conversation (template "${process.env.CLAUDE_VM_TEMPLATE ?? "claude-code"}")`);

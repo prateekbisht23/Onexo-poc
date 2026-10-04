@@ -47,8 +47,6 @@ type ServerMessage =
   | { type: "fs_tree"; sessionId?: string; path: string; entries: any[]; changed: string[] }
   | { type: "fs_file"; sessionId?: string; path: string; content: string }
   | { type: "fs_change"; sessionId?: string; path: string; kind: "created" | "modified" | "deleted" }
-  | { type: "login_url"; url: string }
-  | { type: "login_result"; ok: boolean; error?: string }
   | { type: "mcp_servers"; servers: McpServer[] }
   | { type: "mcp_auth_url"; name: string; url: string }
   | { type: "mcp_connect_error"; name: string; error: string }
@@ -284,8 +282,6 @@ export default function App() {
   // sessions with a live VM on the server: sessionId → currently generating?
   const [liveMap, setLiveMap] = useState<Record<string, boolean>>({});
   const [showFiles, setShowFiles] = useState(false);
-  const [loginUrl, setLoginUrl] = useState<string | null>(null);
-  const [loginCode, setLoginCode] = useState("");
   const [showMcp, setShowMcp] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
@@ -487,21 +483,6 @@ export default function App() {
           pushMessage("error", `Couldn't start OAuth for “${msg.name}”: ${msg.error}`);
           return;
         }
-        if (msg.type === "login_url") {
-          setLoginUrl(msg.url);
-          return;
-        }
-        if (msg.type === "login_result") {
-          setLoginUrl(null);
-          setLoginCode("");
-          pushMessage(
-            msg.ok ? "assistant" : "error",
-            msg.ok
-              ? "✅ Connected your Claude account. New sessions will use it."
-              : `Login failed: ${msg.error ?? "unknown error"}`,
-          );
-          return;
-        }
         // Is this message about the conversation currently on screen?
         const forCurrent = (m: { sessionId?: string; tempId?: string }) =>
           (m.tempId && m.tempId === tempIdRef.current) ||
@@ -593,12 +574,6 @@ export default function App() {
     const text = input.trim();
     if (!text) return;
     // Dashboard slash-commands — handled here, never sent to Claude.
-    if (text === "/login") {
-      pushMessage("user", "/login");
-      sendMsg({ type: "login" });
-      setInput("");
-      return;
-    }
     if (text === "/mcp") {
       sendMsg({ type: "mcp_list" });
       setShowMcp(true);
@@ -610,13 +585,6 @@ export default function App() {
     if (running) return;
     sendText(text);
     setInput("");
-  };
-
-  const submitLoginCode = () => {
-    const code = loginCode.trim();
-    if (!code) return;
-    sendMsg({ type: "login", code });
-    pushMessage("assistant", "Completing login…");
   };
 
   // Shut down this conversation's VM now. Files persist on its volume; the next
@@ -758,33 +726,6 @@ export default function App() {
             }
           />
         )}
-        {loginUrl && (
-          <div className="login-card">
-            <div className="login-step">
-              <span className="login-num">1</span>
-              <a href={loginUrl} target="_blank" rel="noopener noreferrer">
-                Open the Anthropic login page ↗
-              </a>
-            </div>
-            <div className="login-step">
-              <span className="login-num">2</span>
-              <span>Approve access, copy the code it shows, and paste it here:</span>
-            </div>
-            <div className="login-input-row">
-              <input
-                className="other-input"
-                placeholder="Paste authorization code"
-                value={loginCode}
-                onChange={(e) => setLoginCode(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && submitLoginCode()}
-                autoFocus
-              />
-              <button className="submit" disabled={!loginCode.trim()} onClick={submitLoginCode}>
-                Connect
-              </button>
-            </div>
-          </div>
-        )}
         {running && !messages.some((m) => m.streaming) && (
           <div className="thinking">Claude is thinking…</div>
         )}
@@ -794,7 +735,7 @@ export default function App() {
       <footer>
         <textarea
           value={input}
-          placeholder={running ? "Claude is working — draft your next message (send enabled when it finishes)" : "Message Claude Code  ·  /login  /mcp"}
+          placeholder={running ? "Claude is working — draft your next message (send enabled when it finishes)" : "Message Claude Code  ·  /mcp"}
           disabled={!connected}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {

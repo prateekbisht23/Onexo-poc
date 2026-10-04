@@ -34,9 +34,6 @@ const VM_CWD = "/home/user/projects";
 const VM_PROJECT_DIR = "/home/user/.claude/projects/-home-user-projects";
 const ENVD_AUTH = "Basic " + btoa("user:");
 const HEARTBEAT_MARK = "__cube_hb__";
-// Fleet-safe auth: a real API key (per-user or org-pooled) injected per session.
-// Falls back to the OAuth credentials file when unset (single-user PoC only).
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
 
 const CREATE_RETRIES = 5;
 const CREATE_RETRY_DELAY_MS = 5000;
@@ -81,6 +78,9 @@ export type VmClaudeOpts = {
   // The user's MCP config JSON (from their stored servers), uploaded to the VM
   // and referenced by `--mcp-config /home/user/mcp.json` in claudeArgs.
   mcpConfigJson?: string;
+  // Model-auth env for claude (gateway URL + short-lived token), resolved at
+  // launch. No credentials are ever uploaded into the VM or onto the volume.
+  harnessEnv: () => Promise<Record<string, string>>;
 };
 
 export const VM_MCP_CONFIG_PATH = "/home/user/mcp.json";
@@ -203,17 +203,7 @@ export class VmClaudeSession {
       }
     }
 
-    // 3. inject auth + config (+ transcript when resuming).
-    // Prefer an API key (non-expiring, no refresh — the only auth that works
-    // across a fleet of ephemeral VMs; OAuth refresh tokens rotate and can't be
-    // shared). Fall back to the OAuth credentials file for a single-user PoC.
-    if (!ANTHROPIC_API_KEY) {
-      const creds = Bun.file(join(CLAUDE_DIR, ".credentials.json"));
-      if (!(await creds.exists())) {
-        throw new Error(`no ANTHROPIC_API_KEY set and ${join(CLAUDE_DIR, ".credentials.json")} not found`);
-      }
-      await this.uploadFile("/home/user/.claude/.credentials.json", await creds.text());
-    }
+    // 3. inject config (+ transcript when resuming). Model auth is env-only (step 4).
     await this.uploadFile(
       "/home/user/.claude.json",
       JSON.stringify({ hasCompletedOnboarding: true, bypassPermissionsModeAccepted: true }),
@@ -242,8 +232,12 @@ export class VmClaudeSession {
       `exit $code`,
     ].join("\n");
     const args = ["-c", script, "claude-wrapper", ...this.opts.claudeArgs];
-    const claudeEnv: Record<string, string> = { HOME: "/home/user", MCP_TIMEOUT: "60000" };
-    if (ANTHROPIC_API_KEY) claudeEnv.ANTHROPIC_API_KEY = ANTHROPIC_API_KEY;
+    const claudeEnv: Record<string, string> = {
+      HOME: "/home/user",
+      MCP_TIMEOUT: "60000",
+      ...(await this.opts.harnessEnv()),
+    };
+    if (this.dead) return void this.destroy();
     const res = await this.envd("/process.Process/Start", {
       method: "POST",
       headers: { "Content-Type": "application/connect+json", "Connect-Protocol-Version": "1" },
@@ -450,30 +444,6 @@ export class VmClaudeSession {
       await Bun.write(join(LOCAL_TRANSCRIPT_DIR, `${sessionId}.jsonl`), await res.arrayBuffer());
     } catch (err) {
       this.opts.log(`transcript sync failed for ${sessionId}: ${err}`);
-    }
-  }
-
-  /**
-   * OAuth only: pull the (possibly refreshed) credentials back out of the VM so
-   * the next VM injects the current token. OAuth refresh ROTATES the refresh
-   * token, so without this write-back later VMs get a dead token. No-op when an
-   * API key is used (API keys don't rotate). Best-effort; never clobbers with
-   * anything that isn't a valid oauth credentials blob.
-   */
-  async syncCredentials() {
-    if (ANTHROPIC_API_KEY || !this.sandboxId || this.dead) return;
-    try {
-      const res = await this.envd(
-        `/files?path=${encodeURIComponent("/home/user/.claude/.credentials.json")}&username=user`,
-        { signal: AbortSignal.timeout(15_000) },
-      );
-      if (res.status !== 200) return;
-      const text = await res.text();
-      const parsed = JSON.parse(text); // throws → skip write
-      if (!parsed?.claudeAiOauth?.accessToken) return; // not a valid creds blob
-      await Bun.write(join(CLAUDE_DIR, ".credentials.json"), text);
-    } catch (err) {
-      this.opts.log(`credential sync failed: ${err}`);
     }
   }
 

@@ -141,12 +141,13 @@ bun run dev
 
 ---
 
-## Step 6 — Open the app and log in
+## Step 6 — Open the app
 
-1. Open **http://localhost:5173** in your browser.
-2. In the message box type **`/login`**, open the link it shows, approve, and paste the code back.
-   (Alternatively, set your own `ANTHROPIC_API_KEY` in the backend env instead of `/login`.)
-3. Send a message — you're running Claude Code in an isolated cloud sandbox.
+1. Make sure `server/.env` has the OneXO gateway config (see `server/.env.example`) and your
+   tunnel includes `-R 0.0.0.0:18000:localhost:8000` so the VMs can reach OneXO's Kong.
+2. Open **http://localhost:5173** in your browser.
+3. Send a message — Claude Code runs in an isolated cloud sandbox and every model call goes
+   through the OneXO AI gateway. No login needed.
 
 ---
 
@@ -169,7 +170,8 @@ Each time you want to use it, just:
   or ask the owner how to remap.
 - **Everything's slow / "no more resource"** → the shared server has limited capacity (a few
   concurrent sessions total). Try again in a bit, or coordinate with the group.
-- **Login didn't stick** → run `/login` again; tokens are per-user and refresh over time.
+- **Claude fails with 401 / "gateway token mint failed"** → local OneXO isn't running, the client
+  secret in `server/.env` is wrong, or the reverse tunnel (port 18000) is down.
 
 > Note: your chats and files live on the shared server, scoped to your `POC_USER` name. Don't put
 > anything sensitive there — it's a shared demo environment.

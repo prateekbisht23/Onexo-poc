@@ -82,9 +82,10 @@ sudo cubemastercli tpl create-from-image \
 `--probe 49983` makes sandbox creation block until envd answers `/health` — clients
 get a ready VM straight from `POST /sandboxes`.
 
-Auth inside VMs comes from the Mac's `~/.claude/.credentials.json` (written by the
-one-time `/login` in the docker container), uploaded at session start. If tokens go
-stale, re-login once in the container: `docker exec -it claude-poc claude`.
+VMs hold no model credentials: claude gets a short-lived OneXO gateway token as env at
+launch and calls OneXO's Kong `/llm/anthropic` through the reverse SSH tunnel
+(`-R 0.0.0.0:18000:localhost:8000`; needs `GatewayPorts clientspecified` in this box's
+sshd_config). See README "Model access".
 
 ## Viewing VM files (envd Filesystem API)
 
