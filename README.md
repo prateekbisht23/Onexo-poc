@@ -25,27 +25,32 @@ SSH tunnel → AWS EC2 (Mumbai)                 docker exec -i claude-poc claude
 **Gateway integration write-up:** [docs/sandbox-harness-gateway.md](docs/sandbox-harness-gateway.md) · diagrams: [architecture](docs/diagrams/architecture.html), [token flow](docs/diagrams/token-flow.html).
 
 ### Plugs: sandbox × harness × gateway
-Three independent seams, each picked by one env var; none knows which of the others it is paired with:
+Three independent seams; none knows which of the others it is paired with. Sandbox and harness come from env; **the gateway is chosen per user by how they `/login`**:
 
 | Plug | Env | Options | Code |
 |---|---|---|---|
 | **Sandbox** — where the agent runs | `SANDBOX` | `cubesandbox` (default), `docker`, `local` | `server/sandbox/` |
 | **Harness** — the coding-agent CLI running the loop | `HARNESS` | `claude-cli` (default) | `server/harness/` |
-| **Gateway** — where model calls go | `GATEWAY` | `connectra` (default), `bifrost` | `server/gateway/` |
+| **Gateway** — where model calls go | `/login` | `connectra` (OneXO login), `anthropic` (own Anthropic account) | `server/gateway/` |
 
-The only contract between a harness and a gateway is protocol-level (`HarnessGatewayConn`: base URL per wire protocol, extra headers, the token-helper URL + key, refresh period). A gateway provider implements `open(user, vantage)` → base URLs + `mint()`; a harness adapter implements its CLI's args, stdio encoding and `gatewayConfig(conn)`; the sandbox runs "a binary with args + env + setup files" and never knows it's claude. Adding a gateway or harness is one file plus one registry entry.
+The only contract between a harness and a gateway is protocol-level (`HarnessGatewayConn`: credential kind, base URL per wire protocol, extra headers, the token-helper URL + key, refresh period). A gateway provider implements `open(identity, vantage)` → base URLs + `mint()`; a harness adapter implements its CLI's args, stdio encoding and `gatewayConfig(conn)`; the sandbox runs "a binary with args + env + setup files" and never knows it's claude. Adding a gateway or harness is one file plus one registry entry.
 
-**Gateway swap, verified:** the same claude-cli harness and chat run unchanged against `GATEWAY=connectra` (Kong → Connectra → Bifrost: per-user token, metered as an `ai_usage_event`, Connectra's fallback chain picks the model) and `GATEWAY=bifrost` (straight to Bifrost with one virtual key: no OneXO identity or metering, explicit `BIFROST_MODEL`). `bifrost` is a dev-only comparison point (`// PROTOTYPE:`), not a production path.
+**Gateway swap per user:** the same claude-cli harness runs against either gateway depending on the user's login — `connectra` (Kong → Connectra → Bifrost with the user's own OneXO token: metered as an `ai_usage_event`, policy-checked, Connectra's routing picks the model) or `anthropic` (Claude Code straight to Anthropic on the user's own claude.ai subscription: no OneXO metering or policy).
 
 Per-conversation flow: the first message creates a fresh microVM (~0.3 s) **with a persistent S3 volume mounted at `/home/user/projects`**, injects auth, and starts a persistent claude with stream-json stdio carried over envd's streaming RPC through the tunnel. After every turn the transcript `.jsonl` is downloaded into `~/.claude/projects/vm-claude/`, so the sidebar history works and reopening a conversation later re-mounts the same volume into a new VM and `--resume`s — claude keeps both its memory **and its files** even though the old VM is gone.
 
 ### Persistent storage (S3 volumes)
 Each conversation gets its own CubeSandbox **S3 volume** (`vol-<org>-<user>-<id>`), created on first message and mounted at `/home/user/projects`. Files written by Claude persist there, survive VM teardown, and are restored when the conversation is reopened in a fresh VM. The volume is created via `POST /volumes {name,driver:"s3"}` and attached with `volumeMounts:[{name,path}]` on sandbox create; because it mounts root-owned, the backend runs a one-time `chown user:user` (as root, via envd with no auth header) at startup so Claude (running as `user`) can write. Lifecycle: **idle timeout ~5 min** and **LRU eviction** at capacity tear the VM down losslessly (files are on the volume); the **"End session" button** in the chat header kills the current conversation's VM immediately but keeps the volume (next message restarts it); "Delete conversation" also `Volume.destroy()`s it. The header button is enabled only when a live VM exists for the open conversation and no turn is running. Volume id/tenant are stored in `conversations` (migration 002).
 
-### Model access: OneXO AI gateway only
-Claude never holds a provider key, a claude.ai login, or the OneXO client secret. Every model call goes **claude → OneXO Kong (`/llm/anthropic`) → Connectra → whichever provider the gateway routes to**, and **which model serves a call is the gateway's decision** (`CONNECTRA_MODEL`/`CONNECTRA_SMALL_MODEL` are optional overrides). Model choice belongs to the gateway plug: each provider returns `models` hints and the harness only applies them.
+### Model access: `/login` — OneXO (AI gateway) or your Anthropic account
+Type **`/login`** in the chat. The card offers two ways for Claude to make its model calls; the choice is stored per POC user (`logins` table) and decides the gateway for that user's conversations. Until a user logs in, messages get "Run /login first"; `/logout` signs out; the header chip shows the current login.
 
-Tokens (`server/gateway/broker.ts` + `connectra.ts`): each claude launch opens a gateway session with a random **helper key** scoped to that POC user. Claude's `apiKeyHelper` (passed inline via `--settings`, never written to a settings file) trades that key at this server's `/internal/gateway-token` for a fresh short-lived OneXO token — `client_credentials` as `onexo-sandbox-harness-7c31e5`, delegated via `act_user_id`/`act_tenant_id` so spend is metered per user. Claude re-runs the helper every `GATEWAY_TOKEN_REFRESH_S` (600s, below the 900s TTL) **and on any 401**, so a turn longer than the token's lifetime keeps going with no restart. When the VM/process ends the session is closed and the key stops working. Env injected: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` (`X-Onexo-Correlation-Id`), `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `ONEXO_TOKEN_URL`, `ONEXO_HELPER_KEY`. Nothing is written into the VM or onto the volume.
+| `/login` option | Flow | Model calls go | Credential in the harness |
+|---|---|---|---|
+| **OneXO (AI gateway)** | "Continue with GitHub" → OneXO's sign-in page (authorization code + PKCE, client `onexo-poc-login-3b9d41`) → back to `/auth/onexo/callback` → tenant picker if you belong to several → `/auth/onexo/tenant` | claude → Kong `/llm/anthropic` → Connectra → provider; metered, limited and policy-checked **as you** | **Your own OneXO token** (scope `ai:i` ∩ your role, tenant chosen at login), fetched by Claude's `apiKeyHelper` from this server's `/internal/gateway-token` |
+| **Anthropic account** | claude.ai OAuth copy/paste: open the link, approve, paste the code (`server/auth/anthropic.ts`) | Claude Code → `api.anthropic.com` directly | Your claude.ai token as `CLAUDE_CODE_OAUTH_TOKEN`, refreshed server-side at each launch |
+
+OneXO tokens (`server/auth/logins.ts` + `server/gateway/{broker,connectra}.ts`): each claude launch opens a gateway session with a random **helper key** scoped to that POC user. Claude's `apiKeyHelper` (passed inline via `--settings`, never written to a settings file) trades the key for the user's current OneXO access token; the server refreshes it with the stored refresh token **one refresh at a time per user** (OneXO rotates refresh tokens and revokes the whole login if a rotated-away one is reused) and always persists the newest. Claude re-runs the helper every `GATEWAY_TOKEN_REFRESH_S` (600s, below the 900s TTL) **and on any 401**, so a turn longer than the token's lifetime keeps going. Closing the session revokes the key. A OneXO login lasts as long as its refresh token (7 days), then `/login` again. Env injected for OneXO: `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` (`X-Onexo-Correlation-Id`), `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `ONEXO_TOKEN_URL`, `ONEXO_HELPER_KEY`. Nothing is written into the VM or onto the volume. **Which model serves a call is the gateway's decision** (`CONNECTRA_MODEL` pins one and switches fallbacks off).
 
 VMs reach both Kong and this server through reverse SSH tunnels: `-R 0.0.0.0:18000:localhost:8000` (`ONEXO_LLM_URL`) and `-R 0.0.0.0:18091:localhost:8091` (`POC_URL_FROM_VM`). Config: `server/.env.example`.
 
@@ -54,11 +59,11 @@ Each WebSocket connection gets **one persistent claude process** (`claude -p --i
 **Token storm guard** (`server/gateway/broker.ts`): a harness re-runs its token helper on every 401/403, but a gateway's 403 for "model not allowed" / AI policy is not a token problem — claude would retry with backoff for minutes, silently. When one session asks for ≥4 tokens within 30s the broker refuses further tokens and the server ends the turn with a visible `Model gateway: …` error (a VM conversation's VM is released; files stay on the volume).
 
 ### Conformance (`server/scripts/conformance.ts`)
-Runs every sandbox × gateway pair through the same scenarios on a fresh, isolated POC server driven over `/ws` like the browser: **plain** reply · **tool** call (Bash) · **long-turn** longer than the token refresh (asserts ≥2 tokens + streamed partials) · **rejected-token** (first token deliberately invalid via `GATEWAY_TEST_REJECT_FIRST_TOKEN=1`; asserts recovery) · **unknown-model** (must fail visibly, not hang; a success is a WARN = silent model swap). With `ONEXO_DATABASE_URL`, Connectra runs must also show `ai_usage_event` rows for their correlation id.
+Runs every sandbox × login method through the same scenarios, using the login saved by `/login` in the real POC (copied into each isolated scenario DB; rotated OneXO refresh tokens are written back — stop the real POC server while it runs). Scenarios on a fresh, isolated POC server driven over `/ws` like the browser: **plain** reply · **tool** call (Bash) · **long-turn** longer than the token refresh (asserts ≥2 tokens + streamed partials) · **rejected-token** (first token deliberately invalid via `GATEWAY_TEST_REJECT_FIRST_TOKEN=1`; asserts recovery) · **unknown-model** (must fail visibly, not hang; a success is a WARN = silent model swap). With `ONEXO_DATABASE_URL`, Connectra runs must also show `ai_usage_event` rows for their correlation id.
 ```bash
 cd server
-ONEXO_DATABASE_URL=<onexo db url> bun scripts/conformance.ts                # local × connectra,bifrost
-bun scripts/conformance.ts --sandboxes cubesandbox --gateways connectra     # needs the tunnels
+ONEXO_DATABASE_URL=<onexo db url> bun scripts/conformance.ts                # local × your saved login
+bun scripts/conformance.ts --sandboxes cubesandbox --logins onexo           # needs the tunnels
 bun scripts/conformance.ts --only plain,tool                                # subset
 ```
 Report: printed table + `logs/conformance-<ts>.json`; exit 1 on any FAIL. Last local run: 9 PASS, 1 WARN (Connectra silently served another model for an unknown one — OneXO-side fix tracked separately).
@@ -71,8 +76,9 @@ VM egress lockdown (VMs may reach only the tunnel ports): [docs/egress-lockdown.
 # 1. Container (Claude runtime)
 docker compose up -d --build
 
-# 2. Gateway config: copy server/.env.example → server/.env and fill it in
-#    (needs local OneXO running; client secret from onexo_v1's scripts/seed-sandbox-harness-client.ts)
+# 2. Login config: copy server/.env.example → server/.env and fill it in
+#    (needs local OneXO running; client id/secret from onexo_v1's scripts/seed-poc-login-client.ts)
+#    then type /login in the chat
 
 # 3. Backend on the host
 cd server && bun install && bun run dev          # port 8091
@@ -102,19 +108,15 @@ Requires `~/projects` on the host (bind-mounted as Claude's working directory).
 | `CLAUDE_BIN` | `claude` | claude binary name/path |
 | `SANDBOX` | `cubesandbox` | `cubesandbox` = one microVM per conversation; `docker` = shared local container; `local` = this host |
 | `HARNESS` | `claude-cli` | coding-agent CLI adapter (`server/harness/`) |
-| `GATEWAY` | `connectra` | model gateway provider (`server/gateway/`) |
 | `VM_TEMPLATE` | `claude-code` | CubeSandbox template holding node + the harness CLI + envd |
-| `ONEXO_AUTH_URL` | `http://127.0.0.1:8000` | OneXO Kong, where this server mints gateway tokens |
+| `ONEXO_AUTH_URL` | `http://127.0.0.1:8000` | OneXO Kong, as reached from this server and the user's browser (sign-in, token, tenants) |
+| `POC_LOGIN_CLIENT_ID` / `_SECRET` | _(required for OneXO login)_ | the "Login with OneXO" client (`onexo_v1/scripts/seed-poc-login-client.ts`) |
+| `POC_LOGIN_REDIRECT_URI` | `http://localhost:<PORT>/auth/onexo/callback` | must equal the redirect URI registered for that client |
 | `ONEXO_LLM_URL` | _(required)_ | gateway root (`…/llm`) as seen from inside the VM — the reverse tunnel |
 | `POC_URL_FROM_VM` | _(required)_ | this server as seen from inside the VM — the token helper's endpoint (second reverse tunnel) |
 | `GATEWAY_TOKEN_REFRESH_S` | `600` | how often claude's token helper refreshes (keep below the 900s token TTL) |
 | `ONEXO_LLM_URL_CONTAINER` / `ONEXO_LLM_URL_HOST` | `http://host.docker.internal:8000/llm` / `http://127.0.0.1:8000/llm` | gateway root for `SANDBOX=docker` / `local` |
-| `SANDBOX_HARNESS_CLIENT_ID` / `_SECRET` | _(required)_ | OneXO client (`ai:i ai:dg`) used to mint tokens |
-| `ONEXO_ACT_USER_ID` / `ONEXO_ACT_TENANT_ID` | _(required)_ | OneXO user/tenant the POC user's spend is metered to (`ONEXO_IDENTITY_MAP` for per-user) |
-| `CONNECTRA_MODEL` / `CONNECTRA_SMALL_MODEL` | _(unset)_ | optional model overrides for `GATEWAY=connectra`; unset = Connectra's routing decides |
-| `BIFROST_VK` | _(required for bifrost)_ | Bifrost virtual key for `GATEWAY=bifrost` |
-| `BIFROST_MODEL` / `BIFROST_SMALL_MODEL` | _(main required)_ | explicit `provider/model` ids — Bifrost has no fallback chain to resolve the CLI's default names |
-| `BIFROST_URL_VM` / `_CONTAINER` / `_HOST` | — / `http://host.docker.internal:8080` / `http://127.0.0.1:8080` | Bifrost root per sandbox vantage (VMs need a tunnel, e.g. `-R 0.0.0.0:18080:localhost:8080`) |
+| `CONNECTRA_MODEL` / `CONNECTRA_SMALL_MODEL` | _(unset)_ | OneXO login only: optional model pin; unset = Connectra's routing decides |
 | `SANDBOX_SESSION_TIMEOUT_S` | `7200` | microVM hard lifetime (safety net if a kill is missed) |
 | `VM_IDLE_TTL_S` | `300` | release a conversation's VM after this long idle (resume re-mounts the volume) |
 | `MAX_LIVE_VMS` | `3` | live-VM ceiling per node; new sessions past it evict the LRU idle VM |
@@ -129,7 +131,7 @@ Frontend: `VITE_WS_TARGET` overrides where vite proxies `/ws` (default `ws://127
 
 ## Auth
 
-Model auth is the OneXO gateway token described above — no `/login`, no `ANTHROPIC_API_KEY`, no Keychain. If claude fails with a 401, the token mint failed or expired (check the backend log line `AI gateway: …` for missing config).
+Model auth comes from `/login` (above) — OneXO or the user's own Anthropic account; there is no shared `ANTHROPIC_API_KEY` and no Keychain use. "Run /login first" means the POC user hasn't chosen yet; "OneXO session expired — run /login again" means the OneXO refresh token is gone (7 days, revoked, or reused). The startup lines `gateways:` / `onexo login:` show the active config.
 
 ## WebSocket protocol (`/ws` on the backend)
 

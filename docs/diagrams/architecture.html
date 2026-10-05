@@ -33,10 +33,10 @@
   <div class="frame">
     <p class="eyebrow">Architecture · OneXO sandbox-harness POC</p>
     <h1>Claude CLI in a microVM, every model call through the OneXO gateway</h1>
-    <p class="sub">The harness holds no provider key and no login: it fetches short-lived OneXO tokens from the POC's token broker and calls Kong /llm through a reverse tunnel. Connectra meters each call per user; the direct route to Anthropic is closed.</p>
+    <p class="sub">Shown: the “/login → OneXO (AI gateway)” path. The user signs in to OneXO once; the harness then fetches that user's own short-lived OneXO token from the POC's token broker and calls Kong /llm through a reverse tunnel, metered and policy-checked as that user. The other /login option, “Anthropic account”, sends calls to Anthropic directly on the user's own subscription.</p>
     <svg viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="sandbox-arch-title sandbox-arch-desc">
       <title id="sandbox-arch-title">Sandbox harness through the OneXO AI gateway</title>
-      <desc id="sandbox-arch-desc">Architecture showing a chat UI and POC backend on the laptop driving Claude CLI in a CubeSandbox microVM, whose model calls go through a reverse tunnel to OneXO Kong, Connectra and Bifrost to AWS Bedrock, with tokens minted by the POC broker from OneXO auth and the direct path to Anthropic blocked.</desc>
+      <desc id="sandbox-arch-desc">Architecture of the OneXO login path: a chat UI and POC backend on the laptop drive Claude CLI in a CubeSandbox microVM, whose model calls go through a reverse tunnel to OneXO Kong, Connectra and Bifrost to AWS Bedrock, using the logged-in user's own OneXO token refreshed by the POC broker, with the direct path to Anthropic blocked for this login.</desc>
       <defs>
         <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
@@ -62,8 +62,8 @@
       <rect x="370.0" y="292" width="92" height="12" rx="2" fill="#f5f5f5"/>
       <text x="416" y="301" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HELPER :18091</text>
       <path d="M 416,196 H 472 Q 480,196 480,204 V 428 a 8,8 0 0,0 0,16 V 448 Q 480,456 488,456 H 752" fill="none" stroke="#2e5aa8" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow-link)"/>
-      <rect x="640.0" y="464" width="72" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="676" y="473" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">MINT TOKEN</text>
+      <rect x="634.0" y="464" width="84" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="676" y="473" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">USER REFRESH</text>
       <path d="M 416,436 H 584 Q 592,436 592,428 V 220" fill="none" stroke="#eb6c36" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
       <rect x="606.0" y="300" width="92" height="12" rx="2" fill="#f5f5f5"/>
       <text x="652" y="309" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TUNNEL :18000</text>
@@ -86,7 +86,7 @@
       <rect x="72" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#7a8399" stroke-opacity="0.45" stroke-width="0.8"/>
       <text x="86.0" y="163" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">UI</text>
       <text x="136.0" y="190.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Chat UI</text>
-      <text x="136.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">React · :5173</text>
+      <text x="136.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">/login · :5173</text>
       <rect x="272" y="148" width="144" height="72" rx="6" fill="#f5f5f5"/>
       <rect x="272" y="148" width="144" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
       <rect x="280" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
@@ -122,7 +122,7 @@
       <rect x="760" y="406" width="32" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
       <text x="776.0" y="415" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AUTH</text>
       <text x="824.0" y="442.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">OneXO auth</text>
-      <text x="824.0" y="457.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">client_credentials</text>
+      <text x="824.0" y="457.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">login · PKCE</text>
       <rect x="1160" y="148" width="96" height="72" rx="6" fill="#f5f5f5"/>
       <rect x="1160" y="148" width="96" height="72" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
       <rect x="1168" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
@@ -151,12 +151,12 @@
         <p class="eyebrow">Infra · required to run today</p>
         <h3><span class="dot" style="background:#eb6c36"></span>Make the path exist</h3>
         <ul>
-          <li>OneXO client <code>onexo-sandbox-harness-7c31e5</code> with <code>ai:i ai:dg</code> (seed script); secret only in the POC backend</li>
-          <li>POC user mapped to a OneXO user + a tenant whose AI policy allows the served models</li>
+          <li>OneXO "Login with OneXO" client <code>onexo-poc-login-3b9d41</code> (seed script): PKCE, redirect <code>localhost:8091/auth/onexo/callback</code>, scope <code>ai:i</code></li>
+          <li>Users need a OneXO role with <code>ai:i</code> and a tenant whose AI policy allows the served models; GitHub sign-in enabled</li>
           <li>Bifrost provider + a Connectra fallback chain that resolves Claude CLI's default model names</li>
           <li>EC2 <code>GatewayPorts clientspecified</code>; reverse tunnels <code>-R 0.0.0.0:18000:localhost:8000</code> and <code>:18091</code></li>
           <li><code>ONEXO_LLM_URL</code> / <code>POC_URL_FROM_VM</code> = the addresses a VM sees; ports closed in the security group</li>
-          <li>Egress lockdown so VMs reach only the tunnel ports (<code>docs/egress-lockdown.md</code>)</li>
+          <li>Egress lockdown (<code>docs/egress-lockdown.md</code>) — Anthropic-account logins need <code>api.anthropic.com</code>, so pick strict or permissive</li>
         </ul>
       </div>
       <div class="card">
@@ -164,7 +164,7 @@
         <h3><span class="dot" style="background:#2e5aa8"></span>Shared / production</h3>
         <ul>
           <li>Private networking CubeSandbox → Kong (VPC peering / PrivateLink) instead of laptop tunnels</li>
-          <li>User identity from OneXO login, not env; production client secret in the secret manager</li>
+          <li>Real POC user sessions (today one stub user per browser); the login client's secret in the secret manager; HTTPS redirect URI</li>
           <li>Kong <code>/llm</code> rate limit per user; longer SSE read timeout for long tool runs</li>
           <li>Per-tenant AI policies + per-user budgets for the harness population</li>
           <li>Decide: policy denials as 400, not 403 (proposal in OneXO <code>feature/</code>)</li>
@@ -174,15 +174,15 @@
         <p class="eyebrow">Code · where the call is wired</p>
         <h3><span class="dot" style="background:#4f5d75"></span>Touchpoints</h3>
         <ul>
-          <li><code>gateway/connectra.ts</code> mints the delegated OneXO token</li>
+          <li><code>auth/onexo.ts</code> + <code>/auth/onexo/callback</code>: OneXO sign-in, tenant pick</li>
+          <li><code>auth/logins.ts</code> keeps the user's token fresh, one refresh at a time</li>
           <li><code>gateway/broker.ts</code> serves <code>/internal/gateway-token</code>, storm guard</li>
           <li><code>harness/claude-cli.ts</code> sets <code>ANTHROPIC_BASE_URL</code> + <code>apiKeyHelper</code></li>
-          <li><code>sandbox/cubesandbox.ts</code> launches claude in the VM, no credentials</li>
           <li>OneXO: <code>x-onexo-fallbacks: off</code> in Connectra + <code>@bot/agent</code></li>
         </ul>
       </div>
     </div>
-    <footer>POC branch feat/sandbox-harness-gateway · SANDBOX=cubesandbox · HARNESS=claude-cli · GATEWAY=connectra</footer>
+    <footer>POC branch feat/sandbox-harness-gateway · SANDBOX=cubesandbox · HARNESS=claude-cli · gateway per user via /login (OneXO shown)</footer>
   </div>
 </body>
 </html>

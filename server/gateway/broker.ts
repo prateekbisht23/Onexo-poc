@@ -1,7 +1,8 @@
 // Token broker: the one endpoint every harness's token helper calls. Each harness
 // process gets a random key bound to one upstream's mint(); the provider's own
 // credentials never leave this process. close() revokes the key.
-import type { GatewayProvider, GatewayUpstream, Vantage, WireProtocol } from "./types";
+import type { PocIdentity } from "../auth/logins";
+import type { CredentialKind, GatewayProvider, GatewayUpstream, Vantage, WireProtocol } from "./types";
 
 export const GATEWAY_TOKEN_PATH = "/internal/gateway-token";
 
@@ -26,6 +27,9 @@ const POC_URL: Record<Vantage, string> = {
 
 /** Everything a harness adapter needs to point itself at the gateway. Protocol-level only. */
 export type HarnessGatewayConn = {
+  credential: CredentialKind;
+  /** "claude-oauth" only: the subscription token, minted fresh at launch. */
+  oauthToken?: string;
   baseUrls: Partial<Record<WireProtocol, string>>;
   models: { main?: string; small?: string };
   headers: Record<string, string>;
@@ -53,7 +57,7 @@ function log(msg: string) {
 export async function openBrokeredSession(
   provider: GatewayProvider,
   protocol: WireProtocol,
-  pocUser: string,
+  identity: PocIdentity,
   vantage: Vantage,
   onStorm?: (reason: string) => void,
 ): Promise<BrokeredSession> {
@@ -62,12 +66,15 @@ export async function openBrokeredSession(
   }
   const pocUrl = POC_URL[vantage].replace(/\/$/, "");
   if (!pocUrl) throw new Error("POC_URL_FROM_VM is not set — the harness can't refresh its gateway token");
-  const upstream = await provider.open(pocUser, vantage);
+  const upstream = await provider.open(identity, vantage);
+  const oauthToken = upstream.credential === "claude-oauth" ? await upstream.mint() : undefined;
   const helperKey = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
   live.set(helperKey, { upstream, provider: provider.name, issued: 0, recent: [], stormed: false, onStorm });
-  log(`gateway session open gateway=${provider.name} corr=${upstream.correlationId} user=${pocUser} vantage=${vantage}`);
+  log(`gateway session open gateway=${provider.name} corr=${upstream.correlationId} user=${identity.user} vantage=${vantage}`);
   return {
     conn: {
+      credential: upstream.credential,
+      ...(oauthToken ? { oauthToken } : {}),
       baseUrls: upstream.baseUrls,
       models: upstream.models,
       headers: upstream.headers,

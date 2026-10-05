@@ -330,7 +330,7 @@
     <li>Claude's output streams back as JSON events (token by token), which the backend relays to the browser unchanged. After every turn the backend <strong>syncs the transcript</strong> (<code>&lt;session-id&gt;.jsonl</code>) out of the VM.</li>
     <li>The sidebar's SQLite db stores ids, titles, the volume name, and the tenant (<code>org</code>/<code>user</code>) — never the messages.</li>
   </ol>
-  <p>No model credentials ever enter the VM: claude calls the OneXO AI gateway (Kong <code>/llm/anthropic</code> → Connectra) through a reverse tunnel, with short-lived tokens its <code>apiKeyHelper</code> fetches from the backend (<code>server/gateway/</code>). The legacy <strong>docker mode</strong> (<code>SANDBOX=docker</code>) still exists — Claude in the local <code>claude-poc</code> container, with a <code>run_code</code> MCP tool that executes code in one-shot microVMs; the VM mode doesn't need that tool, since Claude's whole shell is already inside a VM.</p>
+  <p>Model access is chosen per user with <code>/login</code>: OneXO (claude calls the OneXO AI gateway — Kong <code>/llm/anthropic</code> → Connectra — through a reverse tunnel, with the user's own short-lived OneXO token fetched by its <code>apiKeyHelper</code> from the backend) or the user's own Anthropic account (direct, <code>CLAUDE_CODE_OAUTH_TOKEN</code>). No credential is written into the VM. The legacy <strong>docker mode</strong> (<code>SANDBOX=docker</code>) still exists — Claude in the local <code>claude-poc</code> container, with a <code>run_code</code> MCP tool that executes code in one-shot microVMs; the VM mode doesn't need that tool, since Claude's whole shell is already inside a VM.</p>
 </section>
 
 <section>

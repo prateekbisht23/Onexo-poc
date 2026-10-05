@@ -23,10 +23,10 @@
   <div class="frame">
     <p class="eyebrow">Sequence · token mint, call, recovery</p>
     <h1>How the harness gets tokens, calls the gateway, and fails visibly</h1>
-    <p class="sub">Claude CLI's apiKeyHelper trades a per-session key at the POC broker for a 900-second OneXO token, re-running it every 10 minutes and on any 401. A gateway refusal that is not about the token trips the broker's storm guard instead of retrying for minutes.</p>
+    <p class="sub">After “/login → OneXO”, the POC holds the user's OneXO refresh token. Claude CLI's apiKeyHelper trades a per-session key at the POC broker for that user's current 900-second token — refreshed one at a time per user, because OneXO rotates refresh tokens — re-running it every 10 minutes and on any 401. A gateway refusal that is not about the token trips the broker's storm guard instead of retrying for minutes.</p>
     <svg viewBox="0 0 1280 760" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="token-flow-title token-flow-desc">
       <title id="token-flow-title">Gateway token flow and recovery</title>
-      <desc id="token-flow-desc">Sequence showing Claude CLI fetching a delegated OneXO token through the POC broker, streaming a call through Kong and Connectra to Bifrost, then either recovering from an expired token by re-running its helper or ending the turn when the broker detects a 403 token storm.</desc>
+      <desc id="token-flow-desc">Sequence showing Claude CLI fetching the logged-in user's own OneXO token through the POC broker, which refreshes it from OneXO auth, streaming a call through Kong and Connectra to Bifrost, then either recovering from an expired token by re-running its helper or ending the turn when the broker detects a 403 token storm.</desc>
       <defs>
         <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
         <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
@@ -46,11 +46,11 @@
       <rect x="223.0" y="156" width="114" height="12" rx="2" fill="#f5f5f5"/>
       <text x="280.0" y="165" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">GET GATEWAY-TOKEN</text>
       <line x1="400" y1="208" x2="636" y2="208" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
-      <rect x="460.0" y="188" width="120" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="520.0" y="197" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">CLIENT_CREDENTIALS</text>
+      <rect x="466.0" y="188" width="108" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="520.0" y="197" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">REFRESH · TENANT</text>
       <line x1="640" y1="240" x2="404" y2="240" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
-      <rect x="484.0" y="220" width="72" height="12" rx="2" fill="#f5f5f5"/>
-      <text x="520.0" y="229" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">JWT · 900S</text>
+      <rect x="469.0" y="220" width="102" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="520.0" y="229" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">USER JWT · 900S</text>
       <line x1="400" y1="272" x2="164" y2="272" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
       <rect x="259.0" y="252" width="42" height="12" rx="2" fill="#f5f5f5"/>
       <text x="280.0" y="261" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TOKEN</text>
@@ -95,13 +95,13 @@
       <rect x="336" y="78" width="28" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
       <text x="350.0" y="87" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">POC</text>
       <text x="400.0" y="106.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Token broker</text>
-      <text x="400.0" y="121.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">gateway-token</text>
+      <text x="400.0" y="121.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">per-user refresh</text>
       <rect x="568" y="72" width="144" height="56" rx="6" fill="#f5f5f5"/>
       <rect x="568" y="72" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
       <rect x="576" y="78" width="32" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
       <text x="592.0" y="87" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AUTH</text>
       <text x="640.0" y="106.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">OneXO auth</text>
-      <text x="640.0" y="121.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">/public/auth/token</text>
+      <text x="640.0" y="121.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">refresh_token grant</text>
       <rect x="808" y="72" width="144" height="56" rx="6" fill="#f5f5f5"/>
       <rect x="808" y="72" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
       <rect x="816" y="78" width="32" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>

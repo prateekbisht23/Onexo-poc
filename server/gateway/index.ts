@@ -1,18 +1,22 @@
-// GATEWAY=<name> picks the provider. Adding one = a new file + an entry here.
-import { bifrostGateway } from "./bifrost";
+// The gateway for a user follows from how they logged in (`/login`): "onexo" → the OneXO AI
+// gateway, "anthropic" → Anthropic directly. Adding a gateway = a provider file + a login method.
+import type { LoginMethod } from "../db";
+import { anthropicGateway } from "./anthropic";
 import { connectraGateway } from "./connectra";
 import type { GatewayProvider } from "./types";
 
-const PROVIDERS: Record<string, GatewayProvider> = {
-  [connectraGateway.name]: connectraGateway,
-  [bifrostGateway.name]: bifrostGateway,
+const BY_LOGIN: Record<LoginMethod, GatewayProvider> = {
+  onexo: connectraGateway,
+  anthropic: anthropicGateway,
 };
 
-export function selectGateway(name = process.env.GATEWAY ?? "connectra"): GatewayProvider {
-  const p = PROVIDERS[name];
-  if (!p) throw new Error(`unknown GATEWAY "${name}" (known: ${Object.keys(PROVIDERS).join(", ")})`);
-  return p;
+export function gatewayForLogin(method: LoginMethod): GatewayProvider {
+  return BY_LOGIN[method];
+}
+
+export function describeGateways(): string {
+  return Object.values(BY_LOGIN).map((g) => g.describe()).join(" | ");
 }
 
 export { GATEWAY_TOKEN_PATH, handleGatewayTokenRequest, openBrokeredSession, type BrokeredSession, type HarnessGatewayConn } from "./broker";
-export type { GatewayProvider, Vantage, WireProtocol } from "./types";
+export type { CredentialKind, GatewayProvider, Vantage, WireProtocol } from "./types";

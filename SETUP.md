@@ -142,12 +142,14 @@ bun run dev
 
 ## Step 6 — Open the app
 
-1. Make sure `server/.env` has the OneXO gateway config (see `server/.env.example`) and your
+1. Make sure `server/.env` has the OneXO login config (see `server/.env.example`) and your
    tunnel includes `-R 0.0.0.0:18000:localhost:8000 -R 0.0.0.0:18091:localhost:8091` so the VMs
    can reach OneXO's Kong and this backend's token endpoint.
 2. Open **http://localhost:5173** in your browser.
-3. Send a message — Claude Code runs in an isolated cloud sandbox and every model call goes
-   through the OneXO AI gateway. No login needed.
+3. Type **`/login`** and pick **OneXO (AI gateway)** — "Continue with GitHub", finish in the new tab
+   (pick a tenant if asked) — or **Anthropic account** (paste the code claude.ai shows you).
+4. Send a message — Claude Code runs in an isolated cloud sandbox; with the OneXO login every model
+   call goes through the OneXO AI gateway as you.
 
 ---
 
@@ -170,8 +172,10 @@ Each time you want to use it, just:
   or ask the owner how to remap.
 - **Everything's slow / "no more resource"** → the shared server has limited capacity (a few
   concurrent sessions total). Try again in a bit, or coordinate with the group.
-- **Claude fails with 401 / "gateway token mint failed"** → local OneXO isn't running, the client
-  secret in `server/.env` is wrong, or a reverse tunnel (port 18000 or 18091) is down.
+- **"Run /login first"** → no login chosen yet for your POC user; type `/login`.
+- **"OneXO session expired — run /login again"** → the 7-day OneXO login ended (or was revoked); `/login` again.
+- **Claude fails with 401 / "OneXO token request failed"** → local OneXO isn't running, `POC_LOGIN_CLIENT_SECRET`
+  in `server/.env` is wrong (re-running the seed rotates it), or a reverse tunnel (port 18000 or 18091) is down.
 
 > Note: your chats and files live on the shared server, scoped to your `POC_USER` name. Don't put
 > anything sensitive there — it's a shared demo environment.

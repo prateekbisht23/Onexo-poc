@@ -8,7 +8,7 @@ Today the `claude-code` template is built with `--allow-internet-access` (full e
 |---|---|
 | host `:18000` (tunnel → OneXO Kong `/llm`) | allow |
 | host `:18091` (tunnel → POC `/internal/gateway-token`) | allow |
-| host `:18080` (Bifrost tunnel — only for `GATEWAY=bifrost` on VMs) | optional |
+| `api.anthropic.com:443` — only if VMs must serve users who `/login` with an **Anthropic account** | optional, see below |
 | replies on host-initiated connections (envd stdio, Files panel) | allow |
 | everything else (internet, `api.anthropic.com`, npm/pip, other host ports) | drop |
 
@@ -57,6 +57,16 @@ From a VM: `curl -sI --max-time 5 https://api.anthropic.com` and `https://pypi.o
 `bun scripts/conformance.ts --sandboxes cubesandbox --gateways connectra` (all PASS, unknown-model WARN),
 and check files survive an "End session" + reopen (if the S3 volume mounts over the VM's network,
 the lockdown breaks it — allow the S3 endpoint too).
+
+## The Anthropic-account login and the lockdown
+
+Users who `/login` with their own Anthropic account need their VM to reach `api.anthropic.com`
+directly. The host can't tell which VM belongs to which login, so allowing it opens that route for
+**every** VM — a pasted Anthropic key would then bypass the OneXO gateway again. Pick one:
+- **Strict (recommended for shared use):** don't allow it; only the OneXO login works on locked
+  hosts. Run Anthropic-account users on a separate, non-locked sandbox host.
+- **Permissive:** add `-d <api.anthropic.com IPs> -p tcp --dport 443 -j ACCEPT` (or a domain
+  allowlist proxy) — accept that the gateway is now the default, not the only path.
 
 ## Trade-offs
 - No `npm install` / `pip install` / `git clone` from the internet inside VMs. If needed later:

@@ -40,6 +40,17 @@ const MIGRATIONS: string[] = [
   // (clientId, tokenEndpoint, resource, accessToken, refreshToken, expiresAt).
   // Kept out of config_json so it's easy to strip before sending to the browser.
   `ALTER TABLE mcp_servers ADD COLUMN oauth_json TEXT`,
+  // 007 — how each POC user logs in for model access (`/login`): 'anthropic' = their own
+  // claude.ai account (direct), 'onexo' = OneXO login (AI gateway). data_json holds that
+  // method's tokens (refresh tokens rotate — always overwrite with the newest).
+  `CREATE TABLE logins (
+     org        TEXT NOT NULL,
+     user       TEXT NOT NULL,
+     method     TEXT NOT NULL CHECK (method IN ('anthropic', 'onexo')),
+     data_json  TEXT NOT NULL,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (org, user)
+   )`,
 ];
 
 export function migrate() {
@@ -161,4 +172,24 @@ export function renameSession(oldId: string, newId: string) {
     `UPDATE conversations SET session_id = ?, updated_at = datetime('now') WHERE session_id = ?`,
     [newId, oldId],
   );
+}
+
+// ---- model-access logins (per POC user) ----
+export type LoginMethod = "anthropic" | "onexo";
+export type LoginRow = { org: string; user: string; method: LoginMethod; data_json: string; updated_at: string };
+
+export function getLogin(org: string, user: string): LoginRow | null {
+  return (db.query(`SELECT * FROM logins WHERE org = ? AND user = ?`).get(org, user) as LoginRow) ?? null;
+}
+
+export function saveLogin(org: string, user: string, method: LoginMethod, data: unknown) {
+  db.run(
+    `INSERT INTO logins (org, user, method, data_json) VALUES (?, ?, ?, ?)
+     ON CONFLICT(org, user) DO UPDATE SET method = excluded.method, data_json = excluded.data_json, updated_at = datetime('now')`,
+    [org, user, method, JSON.stringify(data)],
+  );
+}
+
+export function deleteLogin(org: string, user: string) {
+  db.run(`DELETE FROM logins WHERE org = ? AND user = ?`, [org, user]);
 }
