@@ -29,6 +29,10 @@ export const claudeCli: HarnessAdapter = {
   },
 
   gatewayConfig(c) {
+    if (c.credential === "claude-oauth") {
+      // Own claude.ai subscription: Claude Code talks to Anthropic itself, no gateway in between.
+      return { env: { CLAUDE_CODE_OAUTH_TOKEN: c.oauthToken! }, args: [] };
+    }
     const env: Record<string, string> = {
       ANTHROPIC_BASE_URL: c.baseUrls.anthropic!,
       ANTHROPIC_CUSTOM_HEADERS: Object.entries(c.headers).map(([k, v]) => `${k}: ${v}`).join("\n"),

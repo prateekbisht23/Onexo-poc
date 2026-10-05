@@ -5,7 +5,10 @@ import { deleteConversation, getConversation, listConversations, migrate, rename
 import { runCode, sandboxConfigSummary } from "./sandbox";
 import { destroyVolume, VmHarnessSession, VM_CWD, VM_HOME, VM_MCP_CONFIG_PATH } from "./sandbox/cubesandbox";
 import { dockerSandbox, hostSandbox, type LocalSandbox } from "./sandbox/local";
-import { GATEWAY_TOKEN_PATH, handleGatewayTokenRequest, openBrokeredSession, selectGateway, type BrokeredSession } from "./gateway";
+import { describeGateways, GATEWAY_TOKEN_PATH, gatewayForLogin, handleGatewayTokenRequest, openBrokeredSession, type BrokeredSession } from "./gateway";
+import * as anthropicAuth from "./auth/anthropic";
+import * as onexoAuth from "./auth/onexo";
+import { loginMethod, loginStatus, logout, saveAnthropicLogin, saveOnexoLogin, type PocIdentity } from "./auth/logins";
 import { selectHarness } from "./harness";
 import { addMcpServer, deleteMcpServer, listMcpServers, setMcpEnabled, updateMcpOAuth, upsertOAuthServer, type McpServer } from "./db";
 import * as mcpOAuth from "./mcp-oauth";
@@ -32,7 +35,8 @@ migrate();
 
 // 8091 because 127.0.0.1:8080 is held by another container on this machine.
 const PORT = Number(process.env.PORT ?? 8091);
-// The three plugs (README "Plugs"): which sandbox runs which harness against which gateway.
+// The three plugs (README "Plugs"): which sandbox runs which harness; the gateway is per user,
+// from how they logged in (`/login`: OneXO AI gateway or their own Anthropic account).
 // cubesandbox = one microVM per conversation; docker = shared local container; local = this host.
 const SANDBOX = process.env.SANDBOX ?? "cubesandbox";
 const LOCAL_SANDBOXES: Record<string, LocalSandbox> = { docker: dockerSandbox, local: hostSandbox };
@@ -41,7 +45,6 @@ if (SANDBOX !== "cubesandbox" && !LOCAL_SANDBOXES[SANDBOX]) {
 }
 const localSandbox = LOCAL_SANDBOXES[SANDBOX] ?? dockerSandbox;
 const harness = selectHarness();
-const gateway = selectGateway();
 const PUBLIC_DIR = join(import.meta.dir, "public");
 
 function log(...parts: unknown[]) {
@@ -169,6 +172,8 @@ type ClientMessage =
   | { type: "delete_conversation"; sessionId: string } // wipe VM + volume + row
   | { type: "agent_watch"; sessionId: string; toolUseId: string; path: string }
   | { type: "agent_unwatch"; sessionId: string; toolUseId: string }
+  | { type: "login"; method?: "anthropic" | "onexo"; provider?: string; code?: string } // `/login`
+  | { type: "logout" }
   | { type: "mcp_list" }
   | { type: "mcp_add"; name: string; transport: string; config: Record<string, unknown> }
   | { type: "mcp_connect"; name: string; url: string } // OAuth "Connect" flow
@@ -400,7 +405,7 @@ function createConv(
     resumeSessionId,
     volumeName,
     launch: async () => {
-      conv.gateway = await openBrokeredSession(gateway, harness.protocol, identity.user, "vm", (reason) => {
+      conv.gateway = await openBrokeredSession(gatewayFor(identity), harness.protocol, identity, "vm", (reason) => {
         log(`conv ${conv.id}: ending turn — ${reason}`);
         sendToSubs(conv, { type: "error", sessionId: convPublicId(conv), error: `Model gateway: ${reason}` });
         conv.vm.kill(); // files persist on the volume; the next message starts a fresh VM
@@ -475,6 +480,7 @@ function watchConv(ws: ServerWebSocket<SocketData>, sessionId: string | null) {
 }
 
 async function sendToVmConv(ws: ServerWebSocket<SocketData>, msg: Extract<ClientMessage, { type: "chat" }>) {
+  if (!requireLogin(ws, msg.sessionId)) return;
   const desired = msg.sessionId ?? null;
   let conv = desired ? convs.get(desired) : undefined;
   if (conv?.busy) {
@@ -511,6 +517,141 @@ async function sendToVmConv(ws: ServerWebSocket<SocketData>, msg: Extract<Client
 async function flushConv(conv: Conv) {
   if (!convPublicId(conv)) return;
   await Promise.allSettled([conv.vm.syncTranscript(conv.id), persistAgentOutputs(conv)]);
+}
+
+// ---- `/login`: model access per POC user — OneXO (AI gateway) or own Anthropic account ----
+function gatewayFor(identity: PocIdentity) {
+  const method = loginMethod(identity);
+  if (!method) throw new Error("not logged in — run /login");
+  return gatewayForLogin(method);
+}
+
+function requireLogin(ws: ServerWebSocket<SocketData>, sessionId?: string): boolean {
+  if (loginMethod(ws.data.identity)) return true;
+  sendJson(ws, { type: "error", sessionId, needsLogin: true, error: "Run /login first — choose OneXO (AI gateway) or your Anthropic account." });
+  return false;
+}
+
+function sendLoginStatus(identity: PocIdentity) {
+  const status = loginStatus(identity);
+  for (const ws of allSockets) {
+    if (ws.data.identity.org === identity.org && ws.data.identity.user === identity.user) sendJson(ws, { type: "login_status", ...status });
+  }
+}
+
+// Pending flows: Anthropic copy/paste verifiers per user; OneXO redirect state → PKCE + who started it.
+const anthropicVerifiers = new Map<string, { verifier: string; ts: number }>();
+type OnexoPending = { verifier: string; identity: PocIdentity; ts: number; tokens?: onexoAuth.OnexoTokens; email?: string; userId?: string; tenants?: Array<{ publicId: string; name: string }> };
+const onexoPending = new Map<string, OnexoPending>();
+const PENDING_TTL_MS = 10 * 60_000;
+const idKey = (i: PocIdentity) => `${i.org}\u0000${i.user}`;
+
+async function handleLogin(ws: ServerWebSocket<SocketData>, msg: Extract<ClientMessage, { type: "login" }>) {
+  const identity = ws.data.identity;
+  try {
+    if (!msg.method) {
+      // The two options; OneXO's enabled sign-in providers come from OneXO itself.
+      let onexo: { providers: string[] } | { error: string };
+      try { onexo = { providers: await onexoAuth.listProviders() }; } catch (e) { onexo = { error: e instanceof Error ? e.message : String(e) }; }
+      sendJson(ws, { type: "login_options", current: loginStatus(identity), onexo });
+      return;
+    }
+    if (msg.method === "anthropic") {
+      if (!msg.code) {
+        const { url, verifier } = anthropicAuth.buildAuthorize();
+        anthropicVerifiers.set(idKey(identity), { verifier, ts: Date.now() });
+        sendJson(ws, { type: "login_url", url });
+        return;
+      }
+      const rec = anthropicVerifiers.get(idKey(identity));
+      if (!rec || Date.now() - rec.ts > PENDING_TTL_MS) throw new Error("Login expired — type /login again to restart.");
+      saveAnthropicLogin(identity, await anthropicAuth.exchange(msg.code, rec.verifier));
+      anthropicVerifiers.delete(idKey(identity));
+      log(`login ok method=anthropic user=${identity.user}`);
+      sendJson(ws, { type: "login_result", ok: true, method: "anthropic" });
+      sendLoginStatus(identity);
+      return;
+    }
+    // OneXO: the browser opens OneXO's sign-in page; it redirects back to /auth/onexo/callback.
+    const provider = msg.provider ?? "github";
+    const state = crypto.randomUUID();
+    const { verifier, challenge } = onexoAuth.newPkce();
+    onexoPending.set(state, { verifier, identity, ts: Date.now() });
+    sendJson(ws, { type: "login_onexo_url", provider, url: onexoAuth.authorizeUrl(provider, state, challenge) });
+  } catch (err) {
+    log(`login failed method=${msg.method ?? "-"} user=${identity.user}: ${err}`);
+    sendJson(ws, { type: "login_result", ok: false, method: msg.method, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function authPage(title: string, body: string, status = 200): Response {
+  return new Response(
+    `<!doctype html><meta charset=utf-8><title>${title}</title><body style="font:15px system-ui;padding:40px;max-width:560px;background:#0f1115;color:#e6e8ee">` +
+      `<h2 style="font-weight:600">${title}</h2>${body}</body>`,
+    { status, headers: { "content-type": "text/html" } },
+  );
+}
+
+const escHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+async function finishOnexoLogin(state: string, p: OnexoPending, tenant: { publicId: string; name: string }): Promise<Response> {
+  // /llm requires a tenant: re-issue the session's token for the chosen one (rotates the refresh token).
+  const t = await onexoAuth.refreshTokens(p.tokens!.refreshToken, tenant.publicId);
+  saveOnexoLogin(p.identity, { ...t, userId: p.userId!, email: p.email!, tenantId: tenant.publicId, tenantName: tenant.name });
+  onexoPending.delete(state);
+  log(`login ok method=onexo user=${p.identity.user} onexo=${p.email} tenant=${tenant.name}`);
+  for (const ws of allSockets) {
+    if (ws.data.identity.org === p.identity.org && ws.data.identity.user === p.identity.user) sendJson(ws, { type: "login_result", ok: true, method: "onexo" });
+  }
+  sendLoginStatus(p.identity);
+  return authPage("Logged in with OneXO", `<p>${escHtml(p.email!)} · tenant <b>${escHtml(tenant.name)}</b>.</p><p>Model calls now go through the OneXO AI gateway. You can close this tab and return to the chat.</p>`);
+}
+
+async function handleOnexoCallback(url: URL): Promise<Response> {
+  const state = url.searchParams.get("state") ?? "";
+  const p = onexoPending.get(state);
+  if (!p || Date.now() - p.ts > PENDING_TTL_MS) return authPage("Login expired", "<p>Type <code>/login</code> in the chat again.</p>", 400);
+  const error = url.searchParams.get("error");
+  if (error) {
+    onexoPending.delete(state);
+    return authPage("OneXO login failed", `<p>${escHtml(url.searchParams.get("error_description") ?? error)}</p>`, 400);
+  }
+  try {
+    p.tokens = await onexoAuth.exchangeCode(url.searchParams.get("code") ?? "", p.verifier);
+    const who = await onexoAuth.me(p.tokens.accessToken);
+    if (!who.scopes.includes("ai:i")) {
+      onexoPending.delete(state);
+      return authPage("No AI access", `<p>${escHtml(who.email)} has no <code>ai:i</code> scope in OneXO — ask an admin for a role with AI gateway access.</p>`, 403);
+    }
+    p.email = who.email;
+    p.userId = who.id;
+    p.tenants = await onexoAuth.tenants(p.tokens.accessToken);
+    if (p.tenants.length === 0) {
+      onexoPending.delete(state);
+      return authPage("No tenant", `<p>${escHtml(who.email)} is not a member of any OneXO tenant.</p>`, 403);
+    }
+    if (p.tenants.length === 1) return await finishOnexoLogin(state, p, p.tenants[0]);
+    const links = p.tenants
+      .map((t) => `<p><a style="color:#7aa2f7" href="/auth/onexo/tenant?state=${encodeURIComponent(state)}&tenant=${encodeURIComponent(t.publicId)}">${escHtml(t.name)}</a></p>`)
+      .join("");
+    return authPage("Choose a OneXO tenant", `<p>${escHtml(who.email)} — model usage is metered and policy-checked under this tenant.</p>${links}`);
+  } catch (err) {
+    onexoPending.delete(state);
+    return authPage("OneXO login failed", `<p>${escHtml(err instanceof Error ? err.message : String(err))}</p>`, 502);
+  }
+}
+
+async function handleOnexoTenant(url: URL): Promise<Response> {
+  const state = url.searchParams.get("state") ?? "";
+  const p = onexoPending.get(state);
+  const tenant = p?.tenants?.find((t) => t.publicId === url.searchParams.get("tenant"));
+  if (!p || !tenant || Date.now() - p.ts > PENDING_TTL_MS) return authPage("Login expired", "<p>Type <code>/login</code> in the chat again.</p>", 400);
+  try {
+    return await finishOnexoLogin(state, p, tenant);
+  } catch (err) {
+    onexoPending.delete(state);
+    return authPage("OneXO login failed", `<p>${escHtml(err instanceof Error ? err.message : String(err))}</p>`, 502);
+  }
 }
 
 // ---- MCP: config materialization + OAuth "Connect" flow ----
@@ -715,7 +856,7 @@ function ensureWatch(conv: Conv) {
 // conversation. Resume is only used to reopen an old conversation.
 async function spawnLocalHarness(ws: ServerWebSocket<SocketData>, resumeSessionId: string | null) {
   ws.data.gateway?.close();
-  ws.data.gateway = await openBrokeredSession(gateway, harness.protocol, ws.data.identity.user, localSandbox.vantage, (reason) => {
+  ws.data.gateway = await openBrokeredSession(gatewayFor(ws.data.identity), harness.protocol, ws.data.identity, localSandbox.vantage, (reason) => {
     log(`pid=${ws.data.proc?.pid}: ending turn — ${reason}`);
     sendJson(ws, { type: "error", error: `Model gateway: ${reason}` });
     ws.data.proc?.kill(); // its exit handler reports done (code≠0) for the interrupted turn
@@ -767,6 +908,7 @@ async function spawnLocalHarness(ws: ServerWebSocket<SocketData>, resumeSessionI
 
 // docker/local sandboxes: the per-socket persistent process.
 async function sendToLocalHarness(ws: ServerWebSocket<SocketData>, text: string, sessionId?: string) {
+  if (!requireLogin(ws, sessionId)) return;
   const desired = sessionId ?? null;
   // Conversation switched (new chat, or an old one opened from the sidebar):
   // the running process belongs to another session, so replace it.
@@ -915,11 +1057,17 @@ const server = Bun.serve<SocketData>({
       if (upgraded) return;
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
+    if (url.pathname === "/auth/onexo/callback") {
+      return handleOnexoCallback(url);
+    }
+    if (url.pathname === "/auth/onexo/tenant") {
+      return handleOnexoTenant(url);
+    }
     if (url.pathname === GATEWAY_TOKEN_PATH) {
       return handleGatewayTokenRequest(req);
     }
     if (url.pathname === "/health") {
-      return Response.json({ ok: true, sandbox: SANDBOX, harness: harness.name, gateway: gateway.name });
+      return Response.json({ ok: true, sandbox: SANDBOX, harness: harness.name, gateways: ["onexo", "anthropic"] });
     }
     if (url.pathname === "/mcp") {
       return serveMcp(req);
@@ -952,6 +1100,7 @@ const server = Bun.serve<SocketData>({
     open(ws) {
       allSockets.add(ws);
       sendJson(ws, { type: "ready" });
+      sendJson(ws, { type: "login_status", ...loginStatus(ws.data.identity) });
       if (SANDBOX === "cubesandbox") sendJson(ws, liveSnapshot());
     },
     message(ws, raw) {
@@ -960,6 +1109,16 @@ const server = Bun.serve<SocketData>({
         msg = JSON.parse(String(raw));
       } catch {
         sendJson(ws, { type: "error", error: "Invalid JSON" });
+        return;
+      }
+      if (msg.type === "login") {
+        void handleLogin(ws, msg);
+        return;
+      }
+      if (msg.type === "logout") {
+        logout(ws.data.identity);
+        log(`logout user=${ws.data.identity.user}`);
+        sendLoginStatus(ws.data.identity);
         return;
       }
       if (SANDBOX === "cubesandbox") {
@@ -1060,8 +1219,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 
 console.log(`claude-poc server listening on http://localhost:${server.port}`);
-console.log(`  plugs:        SANDBOX=${SANDBOX} HARNESS=${harness.name} GATEWAY=${gateway.name}`);
-console.log(`  gateway:      ${gateway.describe()}`);
+console.log(`  plugs:        SANDBOX=${SANDBOX} HARNESS=${harness.name} GATEWAY=per user via /login`);
+console.log(`  gateways:     ${describeGateways()}`);
+console.log(`  onexo login:  ${onexoAuth.onexoConfigSummary()}`);
 console.log(`  harness runs: ${SANDBOX === "cubesandbox"
   ? `inside a fresh CubeSandbox microVM per conversation (template "${process.env.VM_TEMPLATE ?? "claude-code"}")`
   : localSandbox.describe()}`);

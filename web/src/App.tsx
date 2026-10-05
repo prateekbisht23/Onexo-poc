@@ -47,12 +47,25 @@ type ServerMessage =
   | { type: "fs_tree"; sessionId?: string; path: string; entries: any[]; changed: string[] }
   | { type: "fs_file"; sessionId?: string; path: string; content: string }
   | { type: "fs_change"; sessionId?: string; path: string; kind: "created" | "modified" | "deleted" }
+  | { type: "login_status"; method: LoginMethod | null; label?: string }
+  | { type: "login_options"; current: { method: LoginMethod | null; label?: string }; onexo: { providers: string[] } | { error: string } }
+  | { type: "login_url"; url: string }
+  | { type: "login_onexo_url"; provider: string; url: string }
+  | { type: "login_result"; ok: boolean; method?: LoginMethod; error?: string }
   | { type: "mcp_servers"; servers: McpServer[] }
   | { type: "mcp_auth_url"; name: string; url: string }
   | { type: "mcp_connect_error"; name: string; error: string }
   | { type: "agent_update"; sessionId: string; toolUseId: string; items: AgentItem[]; running: boolean };
 
 let nextId = 1;
+
+type LoginMethod = "anthropic" | "onexo";
+// `/login` card: pick a method, then finish that method's flow.
+type LoginCard =
+  | { stage: "options"; onexo: { providers: string[] } | { error: string } }
+  | { stage: "anthropic"; url: string }
+  | { stage: "onexo"; provider: string; url: string };
+const PROVIDER_LABEL: Record<string, string> = { github: "GitHub", google: "Google", microsoft: "Microsoft" };
 
 const ASK_RE = /<ask_user>([\s\S]*?)<\/ask_user>/;
 
@@ -283,6 +296,9 @@ export default function App() {
   const [liveMap, setLiveMap] = useState<Record<string, boolean>>({});
   const [showFiles, setShowFiles] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [login, setLogin] = useState<{ method: LoginMethod | null; label?: string }>({ method: null });
+  const [loginCard, setLoginCard] = useState<LoginCard | null>(null);
+  const [loginCode, setLoginCode] = useState("");
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
   // sub-agent transcripts, keyed by the Agent tool's tool_use_id
@@ -470,6 +486,37 @@ export default function App() {
           setAgentRuns((prev) => ({ ...prev, [msg.toolUseId]: { items: msg.items, running: msg.running } }));
           return;
         }
+        if (msg.type === "login_status") {
+          setLogin({ method: msg.method, label: msg.label });
+          return;
+        }
+        if (msg.type === "login_options") {
+          setLoginCard({ stage: "options", onexo: msg.onexo });
+          return;
+        }
+        if (msg.type === "login_url") {
+          setLoginCard({ stage: "anthropic", url: msg.url });
+          return;
+        }
+        if (msg.type === "login_onexo_url") {
+          setLoginCard({ stage: "onexo", provider: msg.provider, url: msg.url });
+          return;
+        }
+        if (msg.type === "login_result") {
+          if (msg.ok) {
+            setLoginCard(null);
+            setLoginCode("");
+            pushMessage(
+              "assistant",
+              msg.method === "onexo"
+                ? "✅ Logged in with OneXO — model calls now go through the OneXO AI gateway."
+                : "✅ Logged in with your Anthropic account — model calls go to Anthropic directly.",
+            );
+          } else {
+            pushMessage("error", `Login failed: ${msg.error ?? "unknown error"}`);
+          }
+          return;
+        }
         if (msg.type === "mcp_servers") {
           setMcpServers(msg.servers);
           return;
@@ -574,6 +621,19 @@ export default function App() {
     const text = input.trim();
     if (!text) return;
     // Dashboard slash-commands — handled here, never sent to Claude.
+    if (text === "/login") {
+      pushMessage("user", "/login");
+      sendMsg({ type: "login" });
+      setInput("");
+      return;
+    }
+    if (text === "/logout") {
+      pushMessage("user", "/logout");
+      sendMsg({ type: "logout" });
+      setLoginCard(null);
+      setInput("");
+      return;
+    }
     if (text === "/mcp") {
       sendMsg({ type: "mcp_list" });
       setShowMcp(true);
@@ -638,6 +698,13 @@ export default function App() {
           {connected ? "connected" : "disconnected"}
         </span>
         {sessionId && <span className="session">session {sessionId.slice(0, 8)}</span>}
+        <button
+          className={`login-chip ${login.method ?? "none"}`}
+          onClick={() => sendMsg({ type: "login" })}
+          title={login.method ? "Change how model calls are made (/login)" : "Choose how model calls are made"}
+        >
+          {login.method ? login.label : "Not logged in · /login"}
+        </button>
         <button
           className="files-toggle"
           onClick={() => setShowMcp(true)}
@@ -726,6 +793,86 @@ export default function App() {
             }
           />
         )}
+        {loginCard && (
+          <div className="login-card">
+            {loginCard.stage === "options" && (
+              <>
+                <div className="login-title">How should Claude make its model calls?</div>
+                <div className="login-options">
+                  <div className="login-option">
+                    <div className="login-option-name">OneXO (AI gateway)</div>
+                    <div className="login-option-sub">Your OneXO account · metered, budgeted and policy-checked per user</div>
+                    {"providers" in loginCard.onexo ? (
+                      loginCard.onexo.providers.map((p) => (
+                        <button key={p} className="submit" onClick={() => sendMsg({ type: "login", method: "onexo", provider: p })}>
+                          Continue with {PROVIDER_LABEL[p] ?? p}
+                        </button>
+                      ))
+                    ) : (
+                      <div className="login-option-error">OneXO unavailable: {loginCard.onexo.error}</div>
+                    )}
+                  </div>
+                  <div className="login-option">
+                    <div className="login-option-name">Anthropic account</div>
+                    <div className="login-option-sub">Your own claude.ai subscription · calls go to Anthropic directly, not via OneXO</div>
+                    <button className="submit" onClick={() => sendMsg({ type: "login", method: "anthropic" })}>
+                      Log in with Anthropic
+                    </button>
+                  </div>
+                </div>
+                {login.method && (
+                  <div className="login-option-sub">Currently: {login.label} · type /logout to sign out</div>
+                )}
+              </>
+            )}
+            {loginCard.stage === "anthropic" && (
+              <>
+                <div className="login-step">
+                  <span className="login-num">1</span>
+                  <a href={loginCard.url} target="_blank" rel="noopener noreferrer">
+                    Open the Anthropic login page ↗
+                  </a>
+                </div>
+                <div className="login-step">
+                  <span className="login-num">2</span>
+                  <span>Approve access, copy the code it shows, and paste it here:</span>
+                </div>
+                <div className="login-input-row">
+                  <input
+                    className="other-input"
+                    placeholder="Paste authorization code"
+                    value={loginCode}
+                    onChange={(e) => setLoginCode(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && loginCode.trim() && sendMsg({ type: "login", method: "anthropic", code: loginCode.trim() })}
+                    autoFocus
+                  />
+                  <button
+                    className="submit"
+                    disabled={!loginCode.trim()}
+                    onClick={() => sendMsg({ type: "login", method: "anthropic", code: loginCode.trim() })}
+                  >
+                    Connect
+                  </button>
+                </div>
+              </>
+            )}
+            {loginCard.stage === "onexo" && (
+              <>
+                <div className="login-step">
+                  <span className="login-num">1</span>
+                  <a href={loginCard.url} target="_blank" rel="noopener noreferrer">
+                    Sign in to OneXO with {PROVIDER_LABEL[loginCard.provider] ?? loginCard.provider} ↗
+                  </a>
+                </div>
+                <div className="login-step">
+                  <span className="login-num">2</span>
+                  <span>Finish in the new tab (pick a tenant if asked). This card closes once you're logged in.</span>
+                </div>
+              </>
+            )}
+            <button className="login-cancel" onClick={() => { setLoginCard(null); setLoginCode(""); }}>Cancel</button>
+          </div>
+        )}
         {running && !messages.some((m) => m.streaming) && (
           <div className="thinking">Claude is thinking…</div>
         )}
@@ -735,7 +882,7 @@ export default function App() {
       <footer>
         <textarea
           value={input}
-          placeholder={running ? "Claude is working — draft your next message (send enabled when it finishes)" : "Message Claude Code  ·  /mcp"}
+          placeholder={running ? "Claude is working — draft your next message (send enabled when it finishes)" : "Message Claude Code  ·  /login  /logout  /mcp"}
           disabled={!connected}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {

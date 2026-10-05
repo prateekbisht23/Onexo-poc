@@ -37,7 +37,7 @@ alternatives.
 - **See the files Claude changed** — live file tree + before/after diffs.
 - **See tool calls** (Bash commands, MCP calls) — click a badge to see its input and result.
 - **See what a launched sub-agent is doing** — its steps, live and afterward.
-- **No Claude login at all** — every model call goes through the OneXO AI gateway, metered per user.
+- **`/login` with OneXO (AI gateway) or your own Anthropic account** — OneXO calls are metered and policy-checked per user; `/logout` signs out.
 - **Configure MCP servers from the UI** (`/mcp`) — one-click OAuth connect, or add by token/command.
 - **Interactive question cards** when Claude needs to ask you something.
 - **End a session** (keep files) or **delete a conversation** (wipe its files).
