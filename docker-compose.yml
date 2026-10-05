@@ -1,0 +1,11 @@
+services:
+  claude-poc:
+    build: .
+    container_name: claude-poc
+    # No ports: the host backend reaches claude via `docker exec`, not the network.
+    init: true
+    volumes:
+      - ${HOME}/.claude:/home/onexo/.claude
+      - ${HOME}/projects:/home/onexo/projects
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
