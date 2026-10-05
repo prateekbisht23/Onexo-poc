@@ -7,7 +7,8 @@ import type { GatewayProvider, Vantage } from "./types";
 const ONEXO_AUTH_URL = (process.env.ONEXO_AUTH_URL ?? "http://127.0.0.1:8000").replace(/\/$/, "");
 const CLIENT_ID = process.env.SANDBOX_HARNESS_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.SANDBOX_HARNESS_CLIENT_SECRET ?? "";
-// Optional: Connectra's routing/fallback chain resolves the harness's default model names.
+// Optional: unset = Connectra's routing/fallback chain resolves the harness's default model
+// names; set = pinned, so fallbacks are switched off for this harness (X-Onexo-Fallbacks).
 const MODELS = { main: process.env.CONNECTRA_MODEL || undefined, small: process.env.CONNECTRA_SMALL_MODEL || undefined };
 
 // The gateway root (…/llm) per vantage: VMs come through the reverse tunnel.
@@ -77,7 +78,11 @@ export const connectraGateway: GatewayProvider = {
       baseUrls: { anthropic: `${root}/anthropic`, openai: `${root}/v1` },
       models: MODELS,
       mint: () => mintToken(pocUser),
-      headers: { "X-Onexo-Correlation-Id": correlationId },
+      headers: {
+        "X-Onexo-Correlation-Id": correlationId,
+        // a pinned model must run or fail visibly — never be swapped by the org fallback chain
+        ...(MODELS.main ? { "X-Onexo-Fallbacks": "off" } : {}),
+      },
       correlationId,
     };
   },
