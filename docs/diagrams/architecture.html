@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sandbox Harness Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --color-paper:#f5f5f5; --color-ink:#2d3142; --color-muted:#4f5d75; --color-accent:#eb6c36;
+      --font-sans:'Geist', system-ui, sans-serif; --font-serif:'Instrument Serif', serif; --font-mono:'Geist Mono', ui-monospace, monospace; }
+    body { font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink); min-height: 100vh;
+      display: flex; align-items: center; justify-content: center; padding: 3rem 2rem; }
+    .frame { max-width: 1280px; width: 100%; }
+    .eyebrow { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem; }
+    h1 { font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); font-weight: 400; letter-spacing: -0.02em; line-height: 1.15; margin-bottom: 0.5rem; }
+    .sub { color: var(--color-muted); font-size: 0.9rem; margin-bottom: 1.5rem; max-width: 70ch; }
+    svg { width: 100%; min-width: 900px; display: block; }
+    .cards { display: grid; grid-template-columns: 1.15fr 1fr 0.95fr; gap: 1rem; margin-top: 1.5rem; }
+    .card { background: #ffffff; border: 1px solid rgba(45,49,66,0.12); border-radius: 6px; padding: 1.25rem; }
+    .card .eyebrow { margin-bottom: 0.4rem; }
+    .card h3 { font-size: 0.95rem; font-weight: 600; margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+    .card ul { list-style: none; font-size: 0.8rem; color: #4f5d75; line-height: 1.55; }
+    .card li { padding-left: 0.9rem; position: relative; margin-bottom: 0.25rem; }
+    .card li::before { content: "–"; position: absolute; left: 0; color: #7a8399; }
+    .card code { font-family: var(--font-mono); font-size: 0.72rem; color: #2d3142; }
+    @media (max-width: 900px) { .cards { grid-template-columns: 1fr; } }
+    footer { margin-top: 1.25rem; padding-top: 0.75rem; border-top: 1px solid rgba(45,49,66,0.12); font-family: var(--font-mono); font-size: 0.66rem; color: var(--color-muted); letter-spacing: 0.06em; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Architecture · OneXO sandbox-harness POC</p>
+    <h1>Claude CLI in a microVM, every model call through the OneXO gateway</h1>
+    <p class="sub">The harness holds no provider key and no login: it fetches short-lived OneXO tokens from the POC's token broker and calls Kong /llm through a reverse tunnel. Connectra meters each call per user; the direct route to Anthropic is closed.</p>
+    <svg viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="sandbox-arch-title sandbox-arch-desc">
+      <title id="sandbox-arch-title">Sandbox harness through the OneXO AI gateway</title>
+      <desc id="sandbox-arch-desc">Architecture showing a chat UI and POC backend on the laptop driving Claude CLI in a CubeSandbox microVM, whose model calls go through a reverse tunnel to OneXO Kong, Connectra and Bifrost to AWS Bedrock, with tokens minted by the POC broker from OneXO auth and the direct path to Anthropic blocked.</desc>
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+        <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+        <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+      </defs>
+      <rect width="100%" height="100%" fill="#f5f5f5"/>
+      <rect x="40" y="112" width="400" height="136" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.14)" stroke-width="0.8" stroke-dasharray="4,4"/>
+      <rect x="52" y="116" width="118" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="111.0" y="125" fill="rgba(45,49,66,0.55)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">POC HOST · LAPTOP</text>
+      <rect x="40" y="360" width="400" height="136" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.14)" stroke-width="0.8" stroke-dasharray="4,4"/>
+      <rect x="52" y="364" width="166" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="135.0" y="373" fill="rgba(45,49,66,0.55)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">CUBESANDBOX MICROVM · EC2</text>
+      <rect x="520" y="112" width="600" height="384" rx="8" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.14)" stroke-width="0.8" stroke-dasharray="4,4"/>
+      <rect x="532" y="116" width="112" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="588.0" y="125" fill="rgba(45,49,66,0.55)" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.14em">ONEXO AI GATEWAY</text>
+      <path d="M 208,184 H 272" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="226.0" y="164" width="28" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="240" y="173" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">WS</text>
+      <path d="M 320,220 V 400" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="212.0" y="292" width="96" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="260" y="301" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">START · STDIO</text>
+      <path d="M 368,400 V 220" fill="none" stroke="#2e5aa8" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow-link)"/>
+      <rect x="370.0" y="292" width="92" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="416" y="301" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">HELPER :18091</text>
+      <path d="M 416,196 H 472 Q 480,196 480,204 V 428 a 8,8 0 0,0 0,16 V 448 Q 480,456 488,456 H 752" fill="none" stroke="#2e5aa8" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#arrow-link)"/>
+      <rect x="640.0" y="464" width="72" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="676" y="473" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">MINT TOKEN</text>
+      <path d="M 416,436 H 584 Q 592,436 592,428 V 220" fill="none" stroke="#eb6c36" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+      <rect x="606.0" y="300" width="92" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="652" y="309" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">TUNNEL :18000</text>
+      <path d="M 688,184 H 752" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="702.0" y="164" width="36" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="720" y="173" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">AI:I</text>
+      <path d="M 896,184 H 960" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+      <rect x="914.0" y="164" width="28" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="928" y="173" fill="#7a8399" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">VK</text>
+      <path d="M 1104,184 H 1160" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+      <rect x="1116.0" y="164" width="32" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="1132" y="173" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">AWS</text>
+      <path d="M 272,448 H 64" fill="none" stroke="#2d3142" stroke-width="1" stroke-dasharray="2,3"/>
+      <line x1="58" y1="438" x2="58" y2="458" stroke="#2d3142" stroke-width="1.6"/>
+      <text x="58" y="476" fill="#2d3142" font-size="10" font-family="'Geist Mono', monospace" text-anchor="middle">✕</text>
+      <rect x="122.0" y="424" width="92" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="168" y="433" fill="#2d3142" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ANTHROPIC.COM</text>
+      <rect x="64" y="148" width="144" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="64" y="148" width="144" height="72" rx="6" fill="rgba(79,93,117,0.10)" stroke="#7a8399" stroke-width="1"/>
+      <rect x="72" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#7a8399" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="86.0" y="163" fill="#7a8399" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">UI</text>
+      <text x="136.0" y="190.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Chat UI</text>
+      <text x="136.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">React · :5173</text>
+      <rect x="272" y="148" width="144" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="272" y="148" width="144" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="280" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="294.0" y="163" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">POC</text>
+      <text x="344.0" y="190.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">POC backend</text>
+      <text x="344.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">plugs · token broker</text>
+      <rect x="272" y="400" width="144" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="272" y="400" width="144" height="72" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+      <rect x="280" y="406" width="50" height="12" rx="2" fill="transparent" stroke="#eb6c36" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="305.0" y="415" fill="#eb6c36" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HARNESS</text>
+      <text x="344.0" y="442.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Claude CLI</text>
+      <text x="344.0" y="457.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">claude -p · no key</text>
+      <rect x="544" y="148" width="144" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="544" y="148" width="144" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="552" y="154" width="32" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="568.0" y="163" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">KONG</text>
+      <text x="616.0" y="190.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Kong /llm</text>
+      <text x="616.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">onexo-auth JWT</text>
+      <rect x="752" y="148" width="144" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="752" y="148" width="144" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="760" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="774.0" y="163" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SVC</text>
+      <text x="824.0" y="190.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Connectra</text>
+      <text x="824.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">meter · policy</text>
+      <rect x="960" y="148" width="144" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="960" y="148" width="144" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="968" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="982.0" y="163" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SVC</text>
+      <text x="1032.0" y="190.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Bifrost</text>
+      <text x="1032.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">routing · keys</text>
+      <rect x="752" y="400" width="144" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="752" y="400" width="144" height="72" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <rect x="760" y="406" width="32" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="776.0" y="415" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">AUTH</text>
+      <text x="824.0" y="442.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">OneXO auth</text>
+      <text x="824.0" y="457.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">client_credentials</text>
+      <rect x="1160" y="148" width="96" height="72" rx="6" fill="#f5f5f5"/>
+      <rect x="1160" y="148" width="96" height="72" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <rect x="1168" y="154" width="28" height="12" rx="2" fill="transparent" stroke="#4f5d75" stroke-opacity="0.45" stroke-width="0.8"/>
+      <text x="1182.0" y="163" fill="#4f5d75" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">EXT</text>
+      <text x="1208.0" y="190.0" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Bedrock</text>
+      <text x="1208.0" y="205.0" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">AWS</text>
+      <line x1="40" y1="536" x2="1240" y2="536" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+      <text x="40" y="552" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGEND</text>
+      <rect x="40" y="568" width="14" height="10" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+      <text x="72" y="577" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Harness (focal)</text>
+      <rect x="208" y="568" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+      <text x="240" y="577" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Service</text>
+      <rect x="376" y="568" width="14" height="10" rx="2" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+      <text x="408" y="577" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">External</text>
+      <line x1="544" y1="573" x2="568" y2="573" stroke="#eb6c36" stroke-width="1.6"/>
+      <text x="576" y="577" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Model call path</text>
+      <line x1="712" y1="573" x2="736" y2="573" stroke="#2e5aa8" stroke-width="1" stroke-dasharray="5,4"/>
+      <text x="744" y="577" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Token flow</text>
+      <line x1="880" y1="573" x2="904" y2="573" stroke="#2d3142" stroke-width="1" stroke-dasharray="2,3"/>
+      <text x="912" y="577" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Blocked egress ✕</text>
+      <rect x="1048" y="568" width="14" height="10" rx="2" fill="rgba(45,49,66,0.02)" stroke="rgba(45,49,66,0.14)" stroke-dasharray="4,4"/>
+      <text x="1080" y="577" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Trust zone</text>
+    </svg>
+    <div class="cards">
+      <div class="card">
+        <p class="eyebrow">Infra · required to run today</p>
+        <h3><span class="dot" style="background:#eb6c36"></span>Make the path exist</h3>
+        <ul>
+          <li>OneXO client <code>onexo-sandbox-harness-7c31e5</code> with <code>ai:i ai:dg</code> (seed script); secret only in the POC backend</li>
+          <li>POC user mapped to a OneXO user + a tenant whose AI policy allows the served models</li>
+          <li>Bifrost provider + a Connectra fallback chain that resolves Claude CLI's default model names</li>
+          <li>EC2 <code>GatewayPorts clientspecified</code>; reverse tunnels <code>-R 0.0.0.0:18000:localhost:8000</code> and <code>:18091</code></li>
+          <li><code>ONEXO_LLM_URL</code> / <code>POC_URL_FROM_VM</code> = the addresses a VM sees; ports closed in the security group</li>
+          <li>Egress lockdown so VMs reach only the tunnel ports (<code>docs/egress-lockdown.md</code>)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p class="eyebrow">Infra · to make it real</p>
+        <h3><span class="dot" style="background:#2e5aa8"></span>Shared / production</h3>
+        <ul>
+          <li>Private networking CubeSandbox → Kong (VPC peering / PrivateLink) instead of laptop tunnels</li>
+          <li>User identity from OneXO login, not env; production client secret in the secret manager</li>
+          <li>Kong <code>/llm</code> rate limit per user; longer SSE read timeout for long tool runs</li>
+          <li>Per-tenant AI policies + per-user budgets for the harness population</li>
+          <li>Decide: policy denials as 400, not 403 (proposal in OneXO <code>feature/</code>)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <p class="eyebrow">Code · where the call is wired</p>
+        <h3><span class="dot" style="background:#4f5d75"></span>Touchpoints</h3>
+        <ul>
+          <li><code>gateway/connectra.ts</code> mints the delegated OneXO token</li>
+          <li><code>gateway/broker.ts</code> serves <code>/internal/gateway-token</code>, storm guard</li>
+          <li><code>harness/claude-cli.ts</code> sets <code>ANTHROPIC_BASE_URL</code> + <code>apiKeyHelper</code></li>
+          <li><code>sandbox/cubesandbox.ts</code> launches claude in the VM, no credentials</li>
+          <li>OneXO: <code>x-onexo-fallbacks: off</code> in Connectra + <code>@bot/agent</code></li>
+        </ul>
+      </div>
+    </div>
+    <footer>POC branch feat/sandbox-harness-gateway · SANDBOX=cubesandbox · HARNESS=claude-cli · GATEWAY=connectra</footer>
+  </div>
+</body>
+</html>

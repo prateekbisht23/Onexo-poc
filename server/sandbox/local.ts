@@ -1,5 +1,6 @@
 // The non-VM sandbox plugs: the harness runs in the shared local docker container
 // (`docker exec`) or straight on this host. One process per WebSocket (index.ts).
+import { mkdirSync } from "fs";
 import { join } from "path";
 import type { Vantage } from "../gateway";
 
@@ -27,6 +28,9 @@ export const dockerSandbox: LocalSandbox = {
   },
   describe: () => `inside docker container "${DOCKER_CONTAINER}" (cwd ${CONTAINER_WORKDIR})`,
 };
+
+// A missing spawn cwd surfaces as ENOENT naming the *binary*, which misleads — create it.
+if (process.env.SANDBOX === "local") mkdirSync(PROJECTS_DIR, { recursive: true });
 
 export const hostSandbox: LocalSandbox = {
   name: "local",
