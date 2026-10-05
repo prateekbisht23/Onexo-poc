@@ -40,6 +40,99 @@ const CONTAINER_WORKDIR = process.env.CONTAINER_WORKDIR ?? "/home/onexo/projects
 // (claude launches inside it; killed when the conversation ends).
 // "docker": the original shared-container flow.
 const CLAUDE_BACKEND = process.env.CLAUDE_BACKEND ?? "cubesandbox";
+
+// OneXO's connector broker issues 1800s tokens with no refresh, so a header stored once in
+// `mcp_servers` is dead within the hour. When these are set, a server pointing at the broker
+// gets a freshly minted token per session instead of its stored one — the same posture
+// `vmclaude.ts` uses for the guardrail hook.
+const CONNECTORS_TOKEN_URL = process.env.CONNECTORS_TOKEN_URL ?? "";
+const CONNECTORS_CLIENT_ID = process.env.CONNECTORS_CLIENT_ID ?? "";
+const CONNECTORS_CLIENT_SECRET = process.env.CONNECTORS_CLIENT_SECRET ?? "";
+const CONNECTORS_TENANT_ID = process.env.CONNECTORS_TENANT_ID ?? "";
+// One configured user for every chat: `getIdentity()` is still a stub (`POC_USER`), so there is
+// no real per-chatter OneXO identity to pass through. Every `execute_action` audits to this one.
+const CONNECTORS_USER_ID = process.env.CONNECTORS_USER_ID ?? "";
+
+// The registry MCP server (skills/agents/pipelines/context) expires the same way. It needs its
+// own client: the broker's holds `conn:i` but not `reg:r`, and the registry's needs `conn:i`
+// anyway because that is one of only two scopes that unlock the `run_tenant_public_id` claim —
+// without which the server resolves no tenant and registers ZERO tools.
+const REGISTRY_CLIENT_ID = process.env.REGISTRY_CLIENT_ID ?? "";
+const REGISTRY_CLIENT_SECRET = process.env.REGISTRY_CLIENT_SECRET ?? "";
+
+interface MintSpec {
+  readonly label: string;
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly claims: Record<string, unknown>;
+}
+
+/** Which OneXO server a stored MCP row points at, and the claims its token needs — `null` for
+ *  anything else (a third-party server, or one of ours left unconfigured). Matched on the URL
+ *  rather than a row flag so no SQLite migration is needed. */
+function mintSpecFor(url: unknown): MintSpec | null {
+  if (typeof url !== "string") return null;
+  const isOnexo = url.endsWith("/connect/mcp") || url.endsWith("/mcp");
+  // Say so rather than falling back silently: an unconfigured var here leaves the server on its
+  // stored (likely expired) header, which surfaces to the user as an opaque 401 three steps later.
+  if (isOnexo && (!CONNECTORS_TOKEN_URL || !CONNECTORS_TENANT_ID)) {
+    log(`mcp mint skipped for ${url}: CONNECTORS_TOKEN_URL/CONNECTORS_TENANT_ID not set — using the stored header`);
+    return null;
+  }
+  if (url.endsWith("/connect/mcp")) {
+    if (!CONNECTORS_CLIENT_ID || !CONNECTORS_CLIENT_SECRET || !CONNECTORS_USER_ID) {
+      log("mcp mint skipped for connectors: CONNECTORS_CLIENT_ID/SECRET/USER_ID not set — using the stored header");
+      return null;
+    }
+    return {
+      label: "connectors",
+      clientId: CONNECTORS_CLIENT_ID,
+      clientSecret: CONNECTORS_CLIENT_SECRET,
+      claims: { run_tenant_public_id: CONNECTORS_TENANT_ID, onexo_user_id: CONNECTORS_USER_ID, tools_providers: "*" },
+    };
+  }
+  if (url.endsWith("/mcp")) {
+    if (!REGISTRY_CLIENT_ID || !REGISTRY_CLIENT_SECRET) {
+      log("mcp mint skipped for registry: REGISTRY_CLIENT_ID/REGISTRY_CLIENT_SECRET not set — using the stored header");
+      return null;
+    }
+    return {
+      label: "registry",
+      clientId: REGISTRY_CLIENT_ID,
+      clientSecret: REGISTRY_CLIENT_SECRET,
+      claims: { run_tenant_public_id: CONNECTORS_TENANT_ID },
+    };
+  }
+  return null;
+}
+
+/** `null` on any failure — the caller then falls back to the stored header, which may still be
+ *  valid; a mint outage must not take a server down for a session that would have worked. */
+async function mintOnexoToken(spec: MintSpec): Promise<string | null> {
+  try {
+    const res = await fetch(CONNECTORS_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "client_credentials",
+        client_id: spec.clientId,
+        client_secret: spec.clientSecret,
+        ...spec.claims,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      log(`${spec.label}: token mint returned HTTP ${res.status} — falling back to the stored header`);
+      return null;
+    }
+    const body = (await res.json()) as { access_token?: string };
+    return typeof body.access_token === "string" && body.access_token ? body.access_token : null;
+  } catch (err) {
+    log(`${spec.label}: token mint failed — falling back to the stored header: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 const PUBLIC_DIR = join(import.meta.dir, "public");
 
 function buildClaudeCommand(args: string[]): string[] {
@@ -585,6 +678,7 @@ async function materializeMcpConfig(org: string, user: string): Promise<string |
   for (const r of rows) {
     try {
       const cfg = JSON.parse(r.config_json);
+      const mintSpec = mintSpecFor(cfg.url);
       if (r.oauth_json) {
         let o = JSON.parse(r.oauth_json);
         if (o.refreshToken && o.expiresAt && o.expiresAt < Date.now() + 60_000) {
@@ -596,6 +690,12 @@ async function materializeMcpConfig(org: string, user: string): Promise<string |
           } catch (e) { log(`mcp token refresh failed for ${r.name}: ${e}`); }
         }
         mcpServers[r.name] = { type: "http", url: cfg.url, headers: { Authorization: `Bearer ${o.accessToken}` } };
+      } else if (mintSpec) {
+        // Mint per session rather than trusting the stored header — see `mintSpecFor` above.
+        const minted = await mintOnexoToken(mintSpec);
+        mcpServers[r.name] = minted
+          ? { type: "http", url: cfg.url, headers: { ...cfg.headers, Authorization: `Bearer ${minted}` } }
+          : { type: r.transport, ...cfg };
       } else {
         mcpServers[r.name] = { type: r.transport, ...cfg };
       }
