@@ -162,6 +162,16 @@ period, and optional model ids. Neither side knows which concrete other side it'
 - Verified without a browser: login gate, `/login` options (GitHub), OneXO accepts the
   authorize URL (302 → GitHub), Anthropic link. The GitHub sign-in itself needs a real browser.
 
+### Phase 9 — your terminal `claude` logged in with OneXO
+- `server/scripts/claude-onexo.sh` starts Claude Code against `<Kong>/llm/anthropic` with an
+  `apiKeyHelper` (`server/scripts/onexo-token.sh`) that fetches the POC user's current OneXO token
+  from the POC server's local-only `GET /internal/cli-token` (`server/auth/cli-token.ts`: loopback
+  only + a secret in `server/.cli-secret`, mode 600). The POC server remains the single refresher.
+- Clears `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN`/Bedrock/Vertex flags for
+  that process so the helper wins; the user's normal `claude` and its claude.ai login are untouched.
+- Verified: `claude-onexo.sh -p …` with the real `$HOME` answered through OneXO — usage row #672,
+  user `f623d89d0182713c`, client `onexo-poc-login-3b9d41`, correlation `cli-…`; a wrong secret → 401.
+
 ---
 
 ## 4. Code changes, file by file

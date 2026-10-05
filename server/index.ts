@@ -9,6 +9,7 @@ import { describeGateways, GATEWAY_TOKEN_PATH, gatewayForLogin, handleGatewayTok
 import * as anthropicAuth from "./auth/anthropic";
 import * as onexoAuth from "./auth/onexo";
 import { loginMethod, loginStatus, logout, saveAnthropicLogin, saveOnexoLogin, type PocIdentity } from "./auth/logins";
+import { CLI_SECRET_FILE, CLI_TOKEN_PATH, handleCliTokenRequest } from "./auth/cli-token";
 import { selectHarness } from "./harness";
 import { addMcpServer, deleteMcpServer, listMcpServers, setMcpEnabled, updateMcpOAuth, upsertOAuthServer, type McpServer } from "./db";
 import * as mcpOAuth from "./mcp-oauth";
@@ -1063,6 +1064,9 @@ const server = Bun.serve<SocketData>({
     if (url.pathname === "/auth/onexo/tenant") {
       return handleOnexoTenant(url);
     }
+    if (url.pathname === CLI_TOKEN_PATH) {
+      return handleCliTokenRequest(req, srv.requestIP(req)?.address, getIdentity(req));
+    }
     if (url.pathname === GATEWAY_TOKEN_PATH) {
       return handleGatewayTokenRequest(req);
     }
@@ -1222,6 +1226,7 @@ console.log(`claude-poc server listening on http://localhost:${server.port}`);
 console.log(`  plugs:        SANDBOX=${SANDBOX} HARNESS=${harness.name} GATEWAY=per user via /login`);
 console.log(`  gateways:     ${describeGateways()}`);
 console.log(`  onexo login:  ${onexoAuth.onexoConfigSummary()}`);
+console.log(`  terminal:     scripts/claude-onexo.sh uses this login (secret ${CLI_SECRET_FILE})`);
 console.log(`  harness runs: ${SANDBOX === "cubesandbox"
   ? `inside a fresh CubeSandbox microVM per conversation (template "${process.env.VM_TEMPLATE ?? "claude-code"}")`
   : localSandbox.describe()}`);
