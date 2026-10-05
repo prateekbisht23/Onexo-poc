@@ -19,6 +19,7 @@ server/public/
 
 # Runtime logs
 logs/
+.cli-secret
 
 # OS / editor
 .DS_Store
