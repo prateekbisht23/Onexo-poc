@@ -5,7 +5,10 @@ How the CubeSandbox chat POC was changed so that **Claude Code CLI is the harnes
 gateway, harness and sandbox as independent, swappable plugs.
 
 - **Diagrams:** [`diagrams/architecture.html`](diagrams/architecture.html) (system + trust
-  zones) and [`diagrams/token-flow.html`](diagrams/token-flow.html) (token mint, call, recovery).
+  zones), [`diagrams/token-flow.html`](diagrams/token-flow.html) (token mint, call, recovery), and the
+  token journey: [`diagrams/token-journey-login.html`](diagrams/token-journey-login.html) (where the
+  OneXO token is born and first stored) and [`diagrams/token-journey-use.html`](diagrams/token-journey-use.html)
+  (how it reaches Kong on every call, and where it stops).
 - **Branches:** `feat/sandbox-harness-gateway` in this repo and in `onexo_v1`.
 - **Jump to:** [§4 code changes, file by file](#4-code-changes-file-by-file) ·
   [§5 infra requirements](#5-infra-requirements) · [§6 how to verify](#6-how-to-verify)

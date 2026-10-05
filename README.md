@@ -22,7 +22,7 @@ SSH tunnel → AWS EC2 (Mumbai)                 docker exec -i claude-poc claude
 └───────────────────────────────────────────────────────────────┘
 ```
 
-**Gateway integration write-up:** [docs/sandbox-harness-gateway.md](docs/sandbox-harness-gateway.md) · diagrams: [architecture](docs/diagrams/architecture.html), [token flow](docs/diagrams/token-flow.html).
+**Gateway integration write-up:** [docs/sandbox-harness-gateway.md](docs/sandbox-harness-gateway.md) · diagrams: [architecture](docs/diagrams/architecture.html), [token flow](docs/diagrams/token-flow.html), token journey [1 · login](docs/diagrams/token-journey-login.html) / [2 · each call](docs/diagrams/token-journey-use.html).
 
 ### Plugs: sandbox × harness × gateway
 Three independent seams; none knows which of the others it is paired with. Sandbox and harness come from env; **the gateway is chosen per user by how they `/login`**:
