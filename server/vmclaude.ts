@@ -85,6 +85,66 @@ export type VmClaudeOpts = {
 
 export const VM_MCP_CONFIG_PATH = "/home/user/mcp.json";
 
+// OneXO guardrails reach the VM as `http` hooks against the platform's own decide route —
+// no bundled engine, no rule cache, no Anthropic key in the VM. The deterministic AND
+// semantic tiers both run server-side, so a dashboard rule edit applies to the next turn.
+const GUARDRAIL_DECIDE_URL = process.env.GUARDRAIL_DECIDE_URL ?? "";
+const GUARDRAIL_CLIENT_ID = process.env.GUARDRAIL_CLIENT_ID ?? "";
+const GUARDRAIL_CLIENT_SECRET = process.env.GUARDRAIL_CLIENT_SECRET ?? "";
+const GUARDRAIL_TENANT_ID = process.env.GUARDRAIL_TENANT_ID ?? "";
+const GUARDRAIL_TOKEN_URL = process.env.GUARDRAIL_TOKEN_URL ?? "";
+
+/** The three events worth screening, with matchers scoped to the tools that can actually
+ *  carry a credential — a matcher of `*` would fire an HTTP round trip on every Todo/Glob call.
+ *  `x-guardrail-tenant` is caller-asserted by design (the route accepts it only when Kong
+ *  injected no verified tenant); it selects which tenant's rules screen this VM's text. */
+function guardrailSettings(token: string) {
+  const hook = {
+    type: "http",
+    url: GUARDRAIL_DECIDE_URL,
+    headers: { Authorization: `Bearer ${token}`, "x-guardrail-tenant": GUARDRAIL_TENANT_ID },
+    timeout: 10,
+  };
+  return {
+    hooks: {
+      UserPromptSubmit: [{ hooks: [hook] }],
+      PreToolUse: [{ matcher: "Bash|Write|Edit|WebFetch|mcp__.*", hooks: [hook] }],
+      PostToolUse: [{ matcher: "Bash|Read|Grep|WebFetch|mcp__.*", hooks: [hook] }],
+    },
+  };
+}
+
+/**
+ * A fresh `gr:x` token per VM. Minted at creation rather than baked into config, so a
+ * conversation only outlives its token if it runs past the 1800s TTL — the backend has no
+ * way to re-write a live VM's settings.json, which is the one residual gap here.
+ * Returns null on any failure; the caller then starts the VM unscreened rather than refusing
+ * to start it at all.
+ */
+async function mintGuardrailToken(log: (m: string) => void): Promise<string | null> {
+  try {
+    const res = await fetch(GUARDRAIL_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "client_credentials",
+        client_id: GUARDRAIL_CLIENT_ID,
+        client_secret: GUARDRAIL_CLIENT_SECRET,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      log(`guardrails: token mint returned HTTP ${res.status} — VM starts unscreened`);
+      return null;
+    }
+    const body = (await res.json()) as { access_token?: string };
+    return typeof body.access_token === "string" && body.access_token ? body.access_token : null;
+  } catch (err) {
+    log(`guardrails: token mint failed — VM starts unscreened: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
 // Create an S3 volume by name (idempotent-ish: a duplicate name is harmless —
 // volumeID == name, so re-creating just returns/So keeps the same volume).
 export async function ensureVolume(name: string): Promise<void> {
@@ -221,6 +281,7 @@ export class VmClaudeSession {
     if (this.opts.mcpConfigJson) {
       await this.uploadFile(VM_MCP_CONFIG_PATH, this.opts.mcpConfigJson);
     }
+    await this.uploadGuardrails();
     if (this.opts.resumeSessionId) {
       const local = Bun.file(join(LOCAL_TRANSCRIPT_DIR, `${this.opts.resumeSessionId}.jsonl`));
       if (await local.exists()) {
@@ -300,6 +361,40 @@ export class VmClaudeSession {
     const wasDead = this.dead;
     this.destroy();
     if (!wasDead) this.opts.onExit({ code: exitCode, stderrTail: this.stderrTail });
+  }
+
+  /**
+   * OneXO guardrails as Claude Code hooks inside the VM: one settings.json registering
+   * `http` hooks against the platform's decide route on three events. The engine, the rules
+   * and the classifier all stay server-side — the VM holds only a short-lived `gr:x` token.
+   * Never fatal: a VM without the hook is the pre-existing behaviour, and refusing to
+   * start a conversation over a missing scanner would be a worse trade than running unscreened.
+   */
+  private async uploadGuardrails() {
+    // Every one of the five is required: a half-configured deployment screens nothing, and
+    // saying so once at VM start beats a hook that silently fails open on every turn.
+    const missing = [
+      ["GUARDRAIL_DECIDE_URL", GUARDRAIL_DECIDE_URL],
+      ["GUARDRAIL_TOKEN_URL", GUARDRAIL_TOKEN_URL],
+      ["GUARDRAIL_CLIENT_ID", GUARDRAIL_CLIENT_ID],
+      ["GUARDRAIL_CLIENT_SECRET", GUARDRAIL_CLIENT_SECRET],
+      ["GUARDRAIL_TENANT_ID", GUARDRAIL_TENANT_ID],
+    ]
+      .filter(([, value]) => !value)
+      .map(([name]) => name);
+    if (missing.length > 0) {
+      this.opts.log(`guardrails: ${missing.join(", ")} not set — VM starts unscreened`);
+      return;
+    }
+
+    try {
+      const token = await mintGuardrailToken(this.opts.log);
+      if (!token) return;
+      await this.uploadFile("/home/user/.claude/settings.json", JSON.stringify(guardrailSettings(token), null, 2));
+      this.opts.log("guardrails: hooks installed (server-side screening)");
+    } catch (err) {
+      this.opts.log(`guardrails upload failed, VM starts unscreened: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private async uploadFile(path: string, content: string) {
